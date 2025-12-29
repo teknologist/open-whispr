@@ -73,6 +73,11 @@ class AudioManager {
 
     // Atomic state flag to prevent race conditions during stop
     this._isStopping = false;
+
+    // Debug logging flags
+    this._firstCheckLogged = false;
+    this._ambientTooLoudLogged = false;
+    this._debugLogCounter = 0;
   }
 
   // Get silence settings from localStorage
@@ -89,19 +94,47 @@ class AudioManager {
     // Debug: log first call to verify interval is running
     if (!this._firstCheckLogged) {
       this._firstCheckLogged = true;
-      console.log("[AudioManager] checkAudioLevel first call:", {
-        hasAnalyser: !!this.analyser,
-        isRecording: this.isRecording,
-        cachedSettings: this.cachedSilenceSettings,
-      });
+      if (isDebugMode) {
+        console.log("[AudioManager] checkAudioLevel first call:", {
+          hasAnalyser: !!this.analyser,
+          isRecording: this.isRecording,
+          cachedSettings: this.cachedSilenceSettings,
+          isCalibrating: this.isCalibrating,
+          ambientTooLoud: this.ambientTooLoud,
+        });
+      }
       window.electronAPI?.logReasoning?.("SILENCE_FIRST_CHECK", {
         hasAnalyser: !!this.analyser,
         isRecording: this.isRecording,
         cachedSettings: this.cachedSilenceSettings,
+        isCalibrating: this.isCalibrating,
+        ambientTooLoud: this.ambientTooLoud,
       });
     }
 
-    if (!this.analyser || !this.isRecording) return;
+    // Log each check during calibration to see what's happening
+    if (this.isCalibrating) {
+      if (isDebugMode) {
+        console.log("[AudioManager] Calibration tick:", {
+          sampleCount: this.ambientCalibrationSamples.length,
+          targetSamples: AMBIENT_CALIBRATION_SAMPLES,
+          hasAnalyser: !!this.analyser,
+          isRecording: this.isRecording,
+        });
+      }
+    }
+
+    if (!this.analyser || !this.isRecording) {
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] Early return - analyser:",
+          !!this.analyser,
+          "isRecording:",
+          this.isRecording,
+        );
+      }
+      return;
+    }
 
     // Use cached settings to avoid repeated localStorage reads
     const { enabled, threshold } = this.cachedSilenceSettings || {};
@@ -112,9 +145,11 @@ class AudioManager {
       // Debug log to understand why silence detection isn't working
       if (!this._ambientTooLoudLogged) {
         this._ambientTooLoudLogged = true;
-        console.log(
-          "[AudioManager] Skipping audio check - environment too noisy",
-        );
+        if (isDebugMode) {
+          console.log(
+            "[AudioManager] Skipping audio check - environment too noisy",
+          );
+        }
         window.electronAPI?.logReasoning?.("SILENCE_SKIPPED_TOO_LOUD", {
           reason: "Environment too noisy for silence detection",
         });
@@ -159,10 +194,12 @@ class AudioManager {
         // Check if environment is too noisy
         if (this.ambientNoiseLevel > MAX_ACCEPTABLE_AMBIENT_RMS) {
           this.ambientTooLoud = true;
-          console.warn(
-            "[AudioManager] Environment too noisy for silence detection:",
-            this.ambientNoiseLevel.toFixed(4),
-          );
+          if (isDebugMode) {
+            console.warn(
+              "[AudioManager] Environment too noisy for silence detection:",
+              this.ambientNoiseLevel.toFixed(4),
+            );
+          }
           window.electronAPI?.logReasoning?.("AMBIENT_TOO_LOUD", {
             ambientLevel: this.ambientNoiseLevel.toFixed(4),
             maxAcceptable: MAX_ACCEPTABLE_AMBIENT_RMS,
@@ -175,17 +212,19 @@ class AudioManager {
           return;
         }
 
-        console.log("[AudioManager] Ambient calibration complete:", {
-          rawSamples: this.ambientCalibrationSamples.map((s) => s.toFixed(4)),
-          validSamples: validSamples.map((s) => s.toFixed(4)),
-          ambientLevel: this.ambientNoiseLevel.toFixed(4),
-          speechThreshold: (
-            this.ambientNoiseLevel * SPEECH_TO_AMBIENT_RATIO
-          ).toFixed(4),
-          silenceThreshold: (
-            this.ambientNoiseLevel * SILENCE_TO_AMBIENT_RATIO
-          ).toFixed(4),
-        });
+        if (isDebugMode) {
+          console.log("[AudioManager] Ambient calibration complete:", {
+            rawSamples: this.ambientCalibrationSamples.map((s) => s.toFixed(4)),
+            validSamples: validSamples.map((s) => s.toFixed(4)),
+            ambientLevel: this.ambientNoiseLevel.toFixed(4),
+            speechThreshold: (
+              this.ambientNoiseLevel * SPEECH_TO_AMBIENT_RATIO
+            ).toFixed(4),
+            silenceThreshold: (
+              this.ambientNoiseLevel * SILENCE_TO_AMBIENT_RATIO
+            ).toFixed(4),
+          });
+        }
         window.electronAPI?.logReasoning?.("AMBIENT_CALIBRATION_COMPLETE", {
           rawSamples: this.ambientCalibrationSamples.map((s) => s.toFixed(4)),
           skippedSamples: AMBIENT_SKIP_INITIAL_SAMPLES,
@@ -221,7 +260,9 @@ class AudioManager {
           : 0,
         configuredThresholdMs: threshold,
       };
-      console.log("[AudioManager] Audio level check:", logData);
+      if (isDebugMode) {
+        console.log("[AudioManager] Audio level check:", logData);
+      }
       window.electronAPI?.logReasoning?.("AUDIO_LEVEL_CHECK", logData);
     }
 
@@ -240,15 +281,17 @@ class AudioManager {
           }
           this._isStopping = true;
 
-          console.log(
-            "[AudioManager] Auto-stopping due to silence after",
-            silenceDuration,
-            "ms (ambient:",
-            this.ambientNoiseLevel?.toFixed(4),
-            ", current:",
-            rms.toFixed(4),
-            ")",
-          );
+          if (isDebugMode) {
+            console.log(
+              "[AudioManager] Auto-stopping due to silence after",
+              silenceDuration,
+              "ms (ambient:",
+              this.ambientNoiseLevel?.toFixed(4),
+              ", current:",
+              rms.toFixed(4),
+              ")",
+            );
+          }
           // Clear interval first to prevent re-triggering
           if (this.silenceCheckInterval) {
             clearInterval(this.silenceCheckInterval);
@@ -266,12 +309,14 @@ class AudioManager {
 
       // Detect speech (significantly above ambient)
       if (rms > speechThreshold && !this.hasDetectedSpeech) {
-        console.log(
-          "[AudioManager] Speech detected, RMS:",
-          rms.toFixed(4),
-          "threshold:",
-          speechThreshold.toFixed(4),
-        );
+        if (isDebugMode) {
+          console.log(
+            "[AudioManager] Speech detected, RMS:",
+            rms.toFixed(4),
+            "threshold:",
+            speechThreshold.toFixed(4),
+          );
+        }
         this.hasDetectedSpeech = true;
       }
     }
@@ -284,7 +329,9 @@ class AudioManager {
 
     // Log via IPC to show in terminal (renderer console.log only shows in DevTools)
     const logMsg = `SILENCE_SETTINGS: enabled=${settings.enabled}, threshold=${settings.threshold}ms`;
-    console.log("[AudioManager]", logMsg);
+    if (isDebugMode) {
+      console.log("[AudioManager]", logMsg);
+    }
     window.electronAPI?.logReasoning?.("SILENCE_DETECTION_INIT", {
       ...settings,
       rawLocalStorage: {
@@ -294,7 +341,9 @@ class AudioManager {
     });
 
     if (!settings.enabled) {
-      console.log("[AudioManager] Silence detection is disabled");
+      if (isDebugMode) {
+        console.log("[AudioManager] Silence detection is disabled");
+      }
       this.cachedSilenceSettings = null; // Clear cache when disabled
       return;
     }
@@ -318,13 +367,17 @@ class AudioManager {
       this.silenceDetectionSource.connect(this.analyser);
 
       // IMPORTANT: Resume AudioContext if suspended (required in modern browsers)
-      console.log(
-        "[AudioManager] AudioContext state before resume:",
-        this.audioContext.state,
-      );
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] AudioContext state before resume:",
+          this.audioContext.state,
+        );
+      }
       if (this.audioContext.state === "suspended") {
         await this.audioContext.resume();
-        console.log("[AudioManager] AudioContext resumed successfully");
+        if (isDebugMode) {
+          console.log("[AudioManager] AudioContext resumed successfully");
+        }
       }
 
       // Reset silence tracking
@@ -346,9 +399,20 @@ class AudioManager {
         this.checkAudioLevel();
       }, SILENCE_CHECK_INTERVAL_MS);
 
-      console.log("[AudioManager] Silence detection started successfully");
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] Silence detection interval started, ID:",
+          this.silenceCheckInterval,
+        );
+        console.log("[AudioManager] Silence detection started successfully");
+      }
     } catch (error) {
-      console.warn("[AudioManager] Failed to start silence detection:", error);
+      if (isDebugMode) {
+        console.warn(
+          "[AudioManager] Failed to start silence detection:",
+          error,
+        );
+      }
       // Notify user that the feature isn't working
       this.onError?.({
         title: "Silence Detection Unavailable",
@@ -361,6 +425,12 @@ class AudioManager {
   // Stop silence detection and cleanup
   async stopSilenceDetection() {
     if (this.silenceCheckInterval) {
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] Clearing interval, ID:",
+          this.silenceCheckInterval,
+        );
+      }
       clearInterval(this.silenceCheckInterval);
       this.silenceCheckInterval = null;
     }
@@ -431,17 +501,24 @@ class AudioManager {
       const hasSpeech =
         rms > SPEECH_RMS_THRESHOLD || peak > SPEECH_PEAK_THRESHOLD;
 
-      console.log("[AudioManager] Audio analysis:", {
-        rms: rms.toFixed(4),
-        peak: peak.toFixed(4),
-        duration: audioBuffer.duration.toFixed(2),
-        hasSpeech,
-        thresholds: { rms: SPEECH_RMS_THRESHOLD, peak: SPEECH_PEAK_THRESHOLD },
-      });
+      if (isDebugMode) {
+        console.log("[AudioManager] Audio analysis:", {
+          rms: rms.toFixed(4),
+          peak: peak.toFixed(4),
+          duration: audioBuffer.duration.toFixed(2),
+          hasSpeech,
+          thresholds: {
+            rms: SPEECH_RMS_THRESHOLD,
+            peak: SPEECH_PEAK_THRESHOLD,
+          },
+        });
+      }
 
       return hasSpeech;
     } catch (error) {
-      console.error("[AudioManager] Error analyzing audio:", error);
+      if (isDebugMode) {
+        console.error("[AudioManager] Error analyzing audio:", error);
+      }
       // If analysis fails, proceed with transcription
       return true;
     } finally {
@@ -479,13 +556,17 @@ class AudioManager {
       };
 
       this.mediaRecorder.onstop = async () => {
-        console.log("[AudioManager] onstop callback triggered");
+        if (isDebugMode) {
+          console.log("[AudioManager] onstop callback triggered");
+        }
 
         // Check if recording was cancelled (Escape key)
         if (this._cancelledRecording) {
-          console.log(
-            "[AudioManager] Recording was cancelled - skipping transcription",
-          );
+          if (isDebugMode) {
+            console.log(
+              "[AudioManager] Recording was cancelled - skipping transcription",
+            );
+          }
           this._cancelledRecording = false;
           this.isRecording = false;
           this.isProcessing = false;
@@ -499,12 +580,14 @@ class AudioManager {
         const speechWasDetected = this.hasDetectedSpeech;
         const silenceDetectionWasEnabled =
           !!this.cachedSilenceSettings?.enabled;
-        console.log(
-          "[AudioManager] Speech detected:",
-          speechWasDetected,
-          "Silence detection enabled:",
-          silenceDetectionWasEnabled,
-        );
+        if (isDebugMode) {
+          console.log(
+            "[AudioManager] Speech detected:",
+            speechWasDetected,
+            "Silence detection enabled:",
+            silenceDetectionWasEnabled,
+          );
+        }
 
         // Stop silence detection immediately
         await this.stopSilenceDetection();
@@ -513,9 +596,11 @@ class AudioManager {
 
         // Skip transcription if silence detection was enabled and no speech was detected
         if (silenceDetectionWasEnabled && !speechWasDetected) {
-          console.log(
-            "[AudioManager] No speech detected - skipping transcription",
-          );
+          if (isDebugMode) {
+            console.log(
+              "[AudioManager] No speech detected - skipping transcription",
+            );
+          }
           this.isProcessing = false;
           this.onStateChange?.({ isRecording: false, isProcessing: false });
           // Clean up stream
@@ -524,10 +609,17 @@ class AudioManager {
         }
 
         const audioBlob = new Blob(this.audioChunks, { type: "audio/wav" });
-        console.log("[AudioManager] audioBlob created, size:", audioBlob.size);
+        if (isDebugMode) {
+          console.log(
+            "[AudioManager] audioBlob created, size:",
+            audioBlob.size,
+          );
+        }
 
         if (audioBlob.size === 0) {
-          console.log("[AudioManager] WARNING: audioBlob is empty!");
+          if (isDebugMode) {
+            console.log("[AudioManager] WARNING: audioBlob is empty!");
+          }
           this.isProcessing = false;
           this.onStateChange?.({ isRecording: false, isProcessing: false });
           stream.getTracks().forEach((track) => track.stop());
@@ -537,9 +629,11 @@ class AudioManager {
         // Analyze audio for silence before transcription
         const hasAudio = await this.analyzeAudioForSpeech(audioBlob);
         if (!hasAudio) {
-          console.log(
-            "[AudioManager] Audio is silent - skipping transcription",
-          );
+          if (isDebugMode) {
+            console.log(
+              "[AudioManager] Audio is silent - skipping transcription",
+            );
+          }
           this.isProcessing = false;
           this.onStateChange?.({ isRecording: false, isProcessing: false });
           stream.getTracks().forEach((track) => track.stop());
@@ -547,33 +641,49 @@ class AudioManager {
         }
 
         this.isProcessing = true;
-        console.log(
-          "[AudioManager] Calling onStateChange with isProcessing=true",
-        );
+        if (isDebugMode) {
+          console.log(
+            "[AudioManager] Calling onStateChange with isProcessing=true",
+          );
+        }
         this.onStateChange?.({ isRecording: false, isProcessing: true });
 
         const durationSeconds = this.recordingStartTime
           ? (Date.now() - this.recordingStartTime) / 1000
           : null;
         this.recordingStartTime = null;
-        console.log(
-          "[AudioManager] About to call processAudio, duration:",
-          durationSeconds,
-        );
+        if (isDebugMode) {
+          console.log(
+            "[AudioManager] About to call processAudio, duration:",
+            durationSeconds,
+          );
+        }
         await this.processAudio(audioBlob, { durationSeconds });
-        console.log("[AudioManager] processAudio completed");
+        if (isDebugMode) {
+          console.log("[AudioManager] processAudio completed");
+        }
 
         // Clean up stream
         stream.getTracks().forEach((track) => track.stop());
-        console.log("[AudioManager] Stream tracks stopped");
+        if (isDebugMode) {
+          console.log("[AudioManager] Stream tracks stopped");
+        }
       };
 
       this.mediaRecorder.start();
       this.isRecording = true;
       this.onStateChange?.({ isRecording: true, isProcessing: false });
 
-      // Start silence detection after recording begins
-      this.startSilenceDetection(stream);
+      // Start silence detection after recording begins (fire and forget - don't await)
+      // The interval will run independently
+      this.startSilenceDetection(stream).catch((err) => {
+        if (isDebugMode) {
+          console.error(
+            "[AudioManager] Error starting silence detection:",
+            err,
+          );
+        }
+      });
 
       return true;
     } catch (error) {
@@ -628,7 +738,9 @@ class AudioManager {
 
   // Cancel recording without processing - used for Escape key abort
   cancelRecording() {
-    console.log("[AudioManager] cancelRecording called");
+    if (isDebugMode) {
+      console.log("[AudioManager] cancelRecording called");
+    }
 
     // Set flag to skip processing in onstop callback
     this._cancelledRecording = true;
@@ -644,9 +756,11 @@ class AudioManager {
 
     // If processing, just reset state (can't cancel in-flight API call)
     if (this.isProcessing) {
-      console.log(
-        "[AudioManager] Cancelling during processing - resetting state",
-      );
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] Cancelling during processing - resetting state",
+        );
+      }
       this.isProcessing = false;
       this.onStateChange?.({ isRecording: false, isProcessing: false });
       return true;
@@ -656,43 +770,63 @@ class AudioManager {
   }
 
   async processAudio(audioBlob, metadata = {}) {
-    console.log("[AudioManager] processAudio START");
+    if (isDebugMode) {
+      console.log("[AudioManager] processAudio START");
+    }
     try {
       const useLocalWhisper =
         localStorage.getItem("useLocalWhisper") === "true";
       const whisperModel = localStorage.getItem("whisperModel") || "base";
-      console.log(
-        "[AudioManager] Using local whisper:",
-        useLocalWhisper,
-        "model:",
-        whisperModel,
-      );
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] Using local whisper:",
+          useLocalWhisper,
+          "model:",
+          whisperModel,
+        );
+      }
 
       let result;
       if (useLocalWhisper) {
-        console.log("[AudioManager] Calling processWithLocalWhisper...");
+        if (isDebugMode) {
+          console.log("[AudioManager] Calling processWithLocalWhisper...");
+        }
         result = await this.processWithLocalWhisper(
           audioBlob,
           whisperModel,
           metadata,
         );
-        console.log("[AudioManager] processWithLocalWhisper returned:", {
-          success: result?.success,
-          textLength: result?.text?.length,
-        });
+        if (isDebugMode) {
+          console.log("[AudioManager] processWithLocalWhisper returned:", {
+            success: result?.success,
+            textLength: result?.text?.length,
+          });
+        }
       } else {
-        console.log("[AudioManager] Calling processWithOpenAIAPI...");
+        if (isDebugMode) {
+          console.log("[AudioManager] Calling processWithOpenAIAPI...");
+        }
         result = await this.processWithOpenAIAPI(audioBlob, metadata);
-        console.log("[AudioManager] processWithOpenAIAPI returned:", {
-          success: result?.success,
-          textLength: result?.text?.length,
-        });
+        if (isDebugMode) {
+          console.log("[AudioManager] processWithOpenAIAPI returned:", {
+            success: result?.success,
+            textLength: result?.text?.length,
+          });
+        }
       }
-      console.log("[AudioManager] Calling onTranscriptionComplete callback...");
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] Calling onTranscriptionComplete callback...",
+        );
+      }
       this.onTranscriptionComplete?.(result);
-      console.log("[AudioManager] onTranscriptionComplete callback done");
+      if (isDebugMode) {
+        console.log("[AudioManager] onTranscriptionComplete callback done");
+      }
     } catch (error) {
-      console.log("[AudioManager] processAudio ERROR:", error.message);
+      if (isDebugMode) {
+        console.log("[AudioManager] processAudio ERROR:", error.message);
+      }
       if (error.message !== "No audio detected") {
         this.onError?.({
           title: "Transcription Error",
@@ -700,14 +834,18 @@ class AudioManager {
         });
       }
     } finally {
-      console.log("[AudioManager] processAudio FINALLY - resetting state");
+      if (isDebugMode) {
+        console.log("[AudioManager] processAudio FINALLY - resetting state");
+      }
       this.isProcessing = false;
       this.onStateChange?.({ isRecording: false, isProcessing: false });
     }
   }
 
   async processWithLocalWhisper(audioBlob, model = "base", metadata = {}) {
-    console.log("[AudioManager] processWithLocalWhisper START");
+    if (isDebugMode) {
+      console.log("[AudioManager] processWithLocalWhisper START");
+    }
     try {
       const arrayBuffer = await audioBlob.arrayBuffer();
       const language = localStorage.getItem("preferredLanguage");
@@ -719,34 +857,42 @@ class AudioManager {
       }
       // Set task: "translate" converts to English, "transcribe" keeps original language
       options.task = translateToEnglish ? "translate" : "transcribe";
-      console.log("[AudioManager] Transcription options:", {
-        language,
-        translateToEnglish,
-        task: options.task,
-        model,
-      });
-      console.log("[AudioManager] Calling transcribeLocalWhisper IPC...");
+      if (isDebugMode) {
+        console.log("[AudioManager] Transcription options:", {
+          language,
+          translateToEnglish,
+          task: options.task,
+          model,
+        });
+        console.log("[AudioManager] Calling transcribeLocalWhisper IPC...");
+      }
 
       const result = await window.electronAPI.transcribeLocalWhisper(
         arrayBuffer,
         options,
       );
-      console.log("[AudioManager] transcribeLocalWhisper IPC returned:", {
-        success: result?.success,
-        text: result?.text?.substring(0, 100),
-        error: result?.error,
-      });
+      if (isDebugMode) {
+        console.log("[AudioManager] transcribeLocalWhisper IPC returned:", {
+          success: result?.success,
+          text: result?.text?.substring(0, 100),
+          error: result?.error,
+        });
+      }
 
       if (result.success && result.text) {
-        console.log(
-          "[AudioManager] Calling processTranscription with text:",
-          result.text.substring(0, 100),
-        );
+        if (isDebugMode) {
+          console.log(
+            "[AudioManager] Calling processTranscription with text:",
+            result.text.substring(0, 100),
+          );
+        }
         const text = await this.processTranscription(result.text, "local");
-        console.log(
-          "[AudioManager] processTranscription returned:",
-          text?.substring(0, 100),
-        );
+        if (isDebugMode) {
+          console.log(
+            "[AudioManager] processTranscription returned:",
+            text?.substring(0, 100),
+          );
+        }
         if (text !== null && text !== undefined) {
           return { success: true, text: text || result.text, source: "local" };
         } else {
@@ -906,11 +1052,13 @@ class AudioManager {
   }
 
   async processWithReasoningModel(text, model, agentName) {
-    console.log("[AudioManager] processWithReasoningModel START", {
-      model,
-      agentName,
-      textLength: text.length,
-    });
+    if (isDebugMode) {
+      console.log("[AudioManager] processWithReasoningModel START", {
+        model,
+        agentName,
+        textLength: text.length,
+      });
+    }
     debugLogger.logReasoning("CALLING_REASONING_SERVICE", {
       model,
       agentName,
@@ -920,11 +1068,15 @@ class AudioManager {
     const startTime = Date.now();
 
     try {
-      console.log("[AudioManager] Calling ReasoningService.processText...");
+      if (isDebugMode) {
+        console.log("[AudioManager] Calling ReasoningService.processText...");
+      }
       const result = await ReasoningService.processText(text, model, agentName);
-      console.log("[AudioManager] ReasoningService.processText returned:", {
-        resultLength: result?.length,
-      });
+      if (isDebugMode) {
+        console.log("[AudioManager] ReasoningService.processText returned:", {
+          resultLength: result?.length,
+        });
+      }
 
       const processingTime = Date.now() - startTime;
 
@@ -935,16 +1087,20 @@ class AudioManager {
         success: true,
       });
 
-      console.log(
-        "[AudioManager] processWithReasoningModel SUCCESS, returning result",
-      );
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] processWithReasoningModel SUCCESS, returning result",
+        );
+      }
       return result;
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      console.log(
-        "[AudioManager] processWithReasoningModel ERROR:",
-        error.message,
-      );
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] processWithReasoningModel ERROR:",
+          error.message,
+        );
+      }
 
       debugLogger.logReasoning("REASONING_SERVICE_ERROR", {
         model,
@@ -958,9 +1114,13 @@ class AudioManager {
   }
 
   async isReasoningAvailable() {
-    console.log("[AudioManager] isReasoningAvailable called");
+    if (isDebugMode) {
+      console.log("[AudioManager] isReasoningAvailable called");
+    }
     if (typeof window === "undefined" || !window.localStorage) {
-      console.log("[AudioManager] No window/localStorage - returning false");
+      if (isDebugMode) {
+        console.log("[AudioManager] No window/localStorage - returning false");
+      }
       return false;
     }
 
@@ -971,17 +1131,21 @@ class AudioManager {
       now < this.reasoningAvailabilityCache.expiresAt &&
       this.cachedReasoningPreference === storedValue;
 
-    console.log("[AudioManager] isReasoningAvailable check:", {
-      storedValue,
-      cacheValid,
-      cachedValue: this.reasoningAvailabilityCache?.value,
-    });
+    if (isDebugMode) {
+      console.log("[AudioManager] isReasoningAvailable check:", {
+        storedValue,
+        cacheValid,
+        cachedValue: this.reasoningAvailabilityCache?.value,
+      });
+    }
 
     if (cacheValid) {
-      console.log(
-        "[AudioManager] Using cached value:",
-        this.reasoningAvailabilityCache.value,
-      );
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] Using cached value:",
+          this.reasoningAvailabilityCache.value,
+        );
+      }
       return this.reasoningAvailabilityCache.value;
     }
 
@@ -995,15 +1159,19 @@ class AudioManager {
     const useReasoning =
       storedValue === "true" || (!!storedValue && storedValue !== "false");
 
-    console.log(
-      "[AudioManager] useReasoning (from localStorage):",
-      useReasoning,
-    );
+    if (isDebugMode) {
+      console.log(
+        "[AudioManager] useReasoning (from localStorage):",
+        useReasoning,
+      );
+    }
 
     if (!useReasoning) {
-      console.log(
-        "[AudioManager] Reasoning disabled in settings - returning false",
-      );
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] Reasoning disabled in settings - returning false",
+        );
+      }
       this.reasoningAvailabilityCache = {
         value: false,
         expiresAt: now + REASONING_CACHE_TTL,
@@ -1013,12 +1181,18 @@ class AudioManager {
     }
 
     try {
-      console.log("[AudioManager] Checking ReasoningService.isAvailable()...");
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] Checking ReasoningService.isAvailable()...",
+        );
+      }
       const isAvailable = await ReasoningService.isAvailable();
-      console.log(
-        "[AudioManager] ReasoningService.isAvailable() =",
-        isAvailable,
-      );
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] ReasoningService.isAvailable() =",
+          isAvailable,
+        );
+      }
 
       debugLogger.logReasoning("REASONING_AVAILABILITY", {
         isAvailable,
@@ -1034,10 +1208,12 @@ class AudioManager {
 
       return isAvailable;
     } catch (error) {
-      console.log(
-        "[AudioManager] ReasoningService.isAvailable() ERROR:",
-        error.message,
-      );
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] ReasoningService.isAvailable() ERROR:",
+          error.message,
+        );
+      }
       debugLogger.logReasoning("REASONING_AVAILABILITY_ERROR", {
         error: error.message,
         stack: error.stack,
@@ -1053,10 +1229,12 @@ class AudioManager {
   }
 
   async processTranscription(text, source) {
-    console.log("[AudioManager] processTranscription START", {
-      source,
-      textLength: text?.length,
-    });
+    if (isDebugMode) {
+      console.log("[AudioManager] processTranscription START", {
+        source,
+        textLength: text?.length,
+      });
+    }
     const normalizedText = typeof text === "string" ? text.trim() : "";
 
     debugLogger.logReasoning("TRANSCRIPTION_RECEIVED", {
@@ -1081,12 +1259,16 @@ class AudioManager {
         ? localStorage.getItem("agentName") || null
         : null;
 
-    console.log("[AudioManager] Checking isReasoningAvailable...");
+    if (isDebugMode) {
+      console.log("[AudioManager] Checking isReasoningAvailable...");
+    }
     const useReasoning = await this.isReasoningAvailable();
-    console.log("[AudioManager] useReasoning =", useReasoning, {
-      reasoningModel,
-      reasoningProvider,
-    });
+    if (isDebugMode) {
+      console.log("[AudioManager] useReasoning =", useReasoning, {
+        reasoningModel,
+        reasoningProvider,
+      });
+    }
 
     debugLogger.logReasoning("REASONING_CHECK", {
       useReasoning,
@@ -1096,9 +1278,11 @@ class AudioManager {
     });
 
     if (useReasoning) {
-      console.log(
-        "[AudioManager] AI Enhancement ENABLED - calling processWithReasoningModel",
-      );
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] AI Enhancement ENABLED - calling processWithReasoningModel",
+        );
+      }
       try {
         const preparedText = normalizedText;
 
