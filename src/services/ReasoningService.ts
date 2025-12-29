@@ -625,6 +625,7 @@ class ReasoningService extends BaseReasoningService {
         model,
         textLength: text.length,
       });
+      console.log("[ReasoningService] Calling processLocalReasoning IPC...");
 
       const result = await window.electronAPI.processLocalReasoning(
         text,
@@ -632,6 +633,12 @@ class ReasoningService extends BaseReasoningService {
         agentName,
         config,
       );
+
+      console.log("[ReasoningService] IPC response received:", {
+        success: result?.success,
+        hasText: !!result?.text,
+        textLength: result?.text?.length,
+      });
 
       const processingTime = Date.now() - startTime;
 
@@ -641,6 +648,7 @@ class ReasoningService extends BaseReasoningService {
           processingTimeMs: processingTime,
           resultLength: result.text.length,
         });
+        console.log("[ReasoningService] Returning success result");
         return result.text;
       } else {
         debugLogger.logReasoning("LOCAL_ERROR", {
@@ -648,6 +656,7 @@ class ReasoningService extends BaseReasoningService {
           processingTimeMs: processingTime,
           error: result.error,
         });
+        console.log("[ReasoningService] Throwing error:", result.error);
         throw new Error(result.error);
       }
     } else {

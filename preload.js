@@ -3,10 +3,19 @@ const { contextBridge, ipcRenderer } = require("electron");
 /**
  * Helper to register an IPC listener and return a cleanup function.
  * Ensures renderer code can easily remove listeners to avoid leaks.
+ * @param {string} channel - IPC channel name (must be non-empty string)
+ * @param {Function} [handlerFactory] - Optional factory to create event handler
  */
 const registerListener = (channel, handlerFactory) => {
+  // Validate channel to prevent runtime errors
+  if (!channel || typeof channel !== "string") {
+    console.error("[Preload] Invalid IPC channel:", channel);
+    return () => () => {}; // Return no-op cleanup
+  }
+
   return (callback) => {
     if (typeof callback !== "function") {
+      console.warn(`[Preload] Invalid callback for channel: ${channel}`);
       return () => {};
     }
 
@@ -28,7 +37,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   showDictationPanel: () => ipcRenderer.invoke("show-dictation-panel"),
   onToggleDictation: registerListener(
     "toggle-dictation",
-    (callback) => () => callback()
+    (callback) => () => callback(),
   ),
 
   // Database functions
@@ -52,8 +61,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onTranscriptionsCleared: (callback) => {
     const listener = (_event, data) => callback?.(data);
     ipcRenderer.on("transcriptions-cleared", listener);
-    return () =>
-      ipcRenderer.removeListener("transcriptions-cleared", listener);
+    return () => ipcRenderer.removeListener("transcriptions-cleared", listener);
   },
 
   // Environment variables
@@ -100,6 +108,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   windowClose: () => ipcRenderer.invoke("window-close"),
   windowIsMaximized: () => ipcRenderer.invoke("window-is-maximized"),
   getPlatform: () => process.platform,
+  isWayland: () =>
+    process.platform === "linux" &&
+    (process.env.XDG_SESSION_TYPE === "wayland" ||
+      !!process.env.WAYLAND_DISPLAY),
+  getSessionType: () => process.env.XDG_SESSION_TYPE || "unknown",
 
   // Cleanup function
   cleanupApp: () => ipcRenderer.invoke("cleanup-app"),
@@ -129,7 +142,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // External link opener
   openExternal: (url) => ipcRenderer.invoke("open-external", url),
-  
+
   // Model management functions
   modelGetAll: () => ipcRenderer.invoke("model-get-all"),
   modelCheck: (modelId) => ipcRenderer.invoke("model-check", modelId),
@@ -138,7 +151,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   modelDeleteAll: () => ipcRenderer.invoke("model-delete-all"),
   modelCheckRuntime: () => ipcRenderer.invoke("model-check-runtime"),
   onModelDownloadProgress: registerListener("model-download-progress"),
-  
+
   // Anthropic API
   getAnthropicKey: () => ipcRenderer.invoke("get-anthropic-key"),
   saveAnthropicKey: (key) => ipcRenderer.invoke("save-anthropic-key", key),
@@ -146,26 +159,38 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Gemini API
   getGeminiKey: () => ipcRenderer.invoke("get-gemini-key"),
   saveGeminiKey: (key) => ipcRenderer.invoke("save-gemini-key", key),
-  
+
   // Local reasoning
-  processLocalReasoning: (text, modelId, agentName, config) => 
-    ipcRenderer.invoke("process-local-reasoning", text, modelId, agentName, config),
-  checkLocalReasoningAvailable: () => 
+  processLocalReasoning: (text, modelId, agentName, config) =>
+    ipcRenderer.invoke(
+      "process-local-reasoning",
+      text,
+      modelId,
+      agentName,
+      config,
+    ),
+  checkLocalReasoningAvailable: () =>
     ipcRenderer.invoke("check-local-reasoning-available"),
-  
+
   // Anthropic reasoning
   processAnthropicReasoning: (text, modelId, agentName, config) =>
-    ipcRenderer.invoke("process-anthropic-reasoning", text, modelId, agentName, config),
-  
+    ipcRenderer.invoke(
+      "process-anthropic-reasoning",
+      text,
+      modelId,
+      agentName,
+      config,
+    ),
+
   // llama.cpp
   llamaCppCheck: () => ipcRenderer.invoke("llama-cpp-check"),
   llamaCppInstall: () => ipcRenderer.invoke("llama-cpp-install"),
   llamaCppUninstall: () => ipcRenderer.invoke("llama-cpp-uninstall"),
-  
+
   // Debug logging for reasoning pipeline
-  logReasoning: (stage, details) => 
+  logReasoning: (stage, details) =>
     ipcRenderer.invoke("log-reasoning", stage, details),
-  
+
   // Remove all listeners for a channel
   removeAllListeners: (channel) => {
     ipcRenderer.removeAllListeners(channel);

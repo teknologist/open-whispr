@@ -26,26 +26,26 @@ class ClipboardManager {
       const originalClipboard = clipboard.readText();
       this.safeLog(
         "💾 Saved original clipboard content:",
-        originalClipboard.substring(0, 50) + "..."
+        originalClipboard.substring(0, 50) + "...",
       );
 
       // Copy text to clipboard first - this always works
       clipboard.writeText(text);
       this.safeLog(
         "📋 Text copied to clipboard:",
-        text.substring(0, 50) + "..."
+        text.substring(0, 50) + "...",
       );
 
       if (process.platform === "darwin") {
         // Check accessibility permissions first
         this.safeLog(
-          "🔍 Checking accessibility permissions for paste operation..."
+          "🔍 Checking accessibility permissions for paste operation...",
         );
         const hasPermissions = await this.checkAccessibilityPermissions();
 
         if (!hasPermissions) {
           this.safeLog(
-            "⚠️ No accessibility permissions - text copied to clipboard only"
+            "⚠️ No accessibility permissions - text copied to clipboard only",
           );
           const errorMsg =
             "Accessibility permissions required for automatic pasting. Text has been copied to clipboard - please paste manually with Cmd+V.";
@@ -72,27 +72,31 @@ class ClipboardManager {
           'tell application "System Events" to keystroke "v" using command down',
         ]);
 
-        let errorOutput = "";
         let hasTimedOut = false;
+        let timeoutId = null;
 
-        pasteProcess.stderr.on("data", (data) => {
-          errorOutput += data.toString();
+        // Centralized cleanup function to prevent memory leaks
+        const cleanup = () => {
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
+          pasteProcess.removeAllListeners();
+        };
+
+        pasteProcess.stderr.on("data", () => {
+          // Collect stderr but don't need to store it
         });
 
         pasteProcess.on("close", (code) => {
           if (hasTimedOut) return;
-
-          // Clear timeout first
-          clearTimeout(timeoutId);
-
-          // Clean up the process reference
-          pasteProcess.removeAllListeners();
+          cleanup();
 
           if (code === 0) {
-            this.safeLog("✅ Text pasted successfully via Cmd+V simulation");
+            this.safeLog("Text pasted successfully via Cmd+V simulation");
             setTimeout(() => {
               clipboard.writeText(originalClipboard);
-              this.safeLog("🔄 Original clipboard content restored");
+              this.safeLog("Original clipboard content restored");
             }, 100);
             resolve();
           } else {
@@ -103,16 +107,19 @@ class ClipboardManager {
 
         pasteProcess.on("error", (error) => {
           if (hasTimedOut) return;
-          clearTimeout(timeoutId);
-          pasteProcess.removeAllListeners();
+          cleanup();
           const errorMsg = `Paste command failed: ${error.message}. Text is copied to clipboard - please paste manually with Cmd+V.`;
           reject(new Error(errorMsg));
         });
 
-        const timeoutId = setTimeout(() => {
+        timeoutId = setTimeout(() => {
           hasTimedOut = true;
-          pasteProcess.kill("SIGKILL");
-          pasteProcess.removeAllListeners();
+          try {
+            pasteProcess.kill("SIGKILL");
+          } catch {
+            // Process may have already exited
+          }
+          cleanup();
           const errorMsg =
             "Paste operation timed out. Text is copied to clipboard - please paste manually with Cmd+V.";
           reject(new Error(errorMsg));
@@ -138,8 +145,8 @@ class ClipboardManager {
         } else {
           reject(
             new Error(
-              `Windows paste failed with code ${code}. Text is copied to clipboard.`
-            )
+              `Windows paste failed with code ${code}. Text is copied to clipboard.`,
+            ),
           );
         }
       });
@@ -147,8 +154,8 @@ class ClipboardManager {
       pasteProcess.on("error", (error) => {
         reject(
           new Error(
-            `Windows paste failed: ${error.message}. Text is copied to clipboard.`
-          )
+            `Windows paste failed: ${error.message}. Text is copied to clipboard.`,
+          ),
         );
       });
     });
@@ -172,12 +179,46 @@ class ClipboardManager {
       (process.env.XDG_SESSION_TYPE || "").toLowerCase() === "wayland" ||
       !!process.env.WAYLAND_DISPLAY;
 
-    // Define paste tools in preference order based on display server
+    // Get the text that was copied to clipboard
+    const textToType = clipboard.readText();
+
+    // On Wayland, prefer wtype for direct text input (no daemon needed)
+    if (isWayland && commandExists("wtype")) {
+      try {
+        await this.typeWithWtype(textToType);
+        this.safeLog("✅ Text typed successfully using wtype");
+        // Restore original clipboard
+        clipboard.writeText(originalClipboard);
+        return;
+      } catch (error) {
+        this.safeLog(
+          "⚠️ wtype failed, falling back to other methods:",
+          error?.message || error,
+        );
+      }
+    }
+
+    // Fallback: try ydotool type (requires ydotoold daemon)
+    if (isWayland && commandExists("ydotool")) {
+      try {
+        await this.typeWithYdotool(textToType);
+        this.safeLog("✅ Text typed successfully using ydotool type");
+        // Restore original clipboard
+        clipboard.writeText(originalClipboard);
+        return;
+      } catch (error) {
+        this.safeLog(
+          "⚠️ ydotool type failed, falling back to paste simulation:",
+          error?.message || error,
+        );
+      }
+    }
+
+    // Fallback: Define paste tools in preference order based on display server
     const candidates = isWayland
       ? [
-          // Wayland tools
+          // Wayland tools for Ctrl+V simulation
           { cmd: "wtype", args: ["-M", "ctrl", "-p", "v", "-m", "ctrl"] },
-          // ydotool requires uinput permissions but included as fallback
           { cmd: "ydotool", args: ["key", "29:1", "47:1", "47:0", "29:0"] },
           // X11 fallback for XWayland
           { cmd: "xdotool", args: ["key", "ctrl+v"] },
@@ -208,7 +249,7 @@ class ClipboardManager {
         proc.on("close", (code) => {
           if (timedOut)
             return reject(
-              new Error(`Paste with ${tool.cmd} timed out after 1 second`)
+              new Error(`Paste with ${tool.cmd} timed out after 1 second`),
             );
           clearTimeout(timeoutId);
 
@@ -237,7 +278,7 @@ class ClipboardManager {
       } catch (error) {
         this.safeLog(
           `⚠️ Paste with ${tool.cmd} failed:`,
-          error?.message || error
+          error?.message || error,
         );
         // Continue to next tool
       }
@@ -245,10 +286,119 @@ class ClipboardManager {
 
     // All tools failed - create specific error for renderer to handle
     const sessionInfo = isWayland ? "Wayland" : "X11";
-    const errorMsg = `Clipboard copied, but paste simulation failed on ${sessionInfo}. Please install ${isWayland ? "wtype or ydotool" : "xdotool"} for automatic pasting, or paste manually with Ctrl+V.`;
+    const errorMsg = `Clipboard copied, but paste simulation failed on ${sessionInfo}. Please install ydotool for automatic typing, or paste manually with Ctrl+V.`;
     const err = new Error(errorMsg);
     err.code = "PASTE_SIMULATION_FAILED";
     throw err;
+  }
+
+  // Direct text typing using wtype (bypasses clipboard, no daemon needed)
+  async typeWithWtype(text) {
+    // Sanitize input: remove control characters that could cause issues
+    // Keep printable chars, newlines, and tabs
+    const sanitized = text.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, "");
+
+    if (!sanitized) {
+      return; // Nothing to type after sanitization
+    }
+
+    return new Promise((resolve, reject) => {
+      // wtype types text directly when given as argument
+      const proc = spawn("wtype", ["--", sanitized]);
+
+      let timedOut = false;
+      let timeoutId = null;
+
+      const cleanup = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        proc.removeAllListeners();
+      };
+
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // Process may have already exited
+        }
+        cleanup();
+        reject(new Error("wtype timed out after 5 seconds"));
+      }, 5000);
+
+      proc.on("close", (code) => {
+        if (timedOut) return;
+        cleanup();
+
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`wtype exited with code ${code}`));
+        }
+      });
+
+      proc.on("error", (error) => {
+        if (timedOut) return;
+        cleanup();
+        reject(error);
+      });
+    });
+  }
+
+  // Direct text typing using ydotool (bypasses clipboard, requires daemon)
+  async typeWithYdotool(text) {
+    // Sanitize input: remove control characters that could cause issues
+    // Keep printable chars, newlines, and tabs
+    const sanitized = text.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, "");
+
+    if (!sanitized) {
+      return; // Nothing to type after sanitization
+    }
+
+    return new Promise((resolve, reject) => {
+      const proc = spawn("ydotool", ["type", "--", sanitized]);
+
+      let timedOut = false;
+      let timeoutId = null;
+
+      const cleanup = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        proc.removeAllListeners();
+      };
+
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // Process may have already exited
+        }
+        cleanup();
+        reject(new Error("ydotool type timed out after 5 seconds"));
+      }, 5000); // Longer timeout for typing
+
+      proc.on("close", (code) => {
+        if (timedOut) return;
+        cleanup();
+
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`ydotool type exited with code ${code}`));
+        }
+      });
+
+      proc.on("error", (error) => {
+        if (timedOut) return;
+        cleanup();
+        reject(error);
+      });
+    });
   }
 
   async checkAccessibilityPermissions() {

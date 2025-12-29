@@ -10,43 +10,57 @@ class LocalReasoningService {
     try {
       // Check if llama.cpp is installed
       await modelManager.ensureLlamaCpp();
-      
+
       // Check if at least one model is downloaded
       const models = await modelManager.getAllModels();
-      return models.some(model => model.isDownloaded);
+      return models.some((model) => model.isDownloaded);
     } catch (error) {
       return false;
     }
   }
 
   async processText(text, modelId, agentName = null, config = {}) {
+    console.log("[LocalReasoningBridge] processText START", {
+      modelId,
+      textLength: text?.length,
+    });
     debugLogger.logReasoning("LOCAL_BRIDGE_START", {
       modelId,
       agentName,
       textLength: text.length,
-      hasConfig: Object.keys(config).length > 0
+      hasConfig: Object.keys(config).length > 0,
     });
-    
+
     if (this.isProcessing) {
+      console.log("[LocalReasoningBridge] BLOCKED - Already processing!");
       throw new Error("Already processing a request");
     }
 
     this.isProcessing = true;
+    console.log("[LocalReasoningBridge] isProcessing set to true");
     const startTime = Date.now();
 
     try {
       // Get custom prompts from the request context
       const customPrompts = config.customPrompts || null;
-      
+
       // Build the reasoning prompt
-      const reasoningPrompt = this.getReasoningPrompt(text, agentName, customPrompts);
-      
+      const reasoningPrompt = this.getReasoningPrompt(
+        text,
+        agentName,
+        customPrompts,
+      );
+      console.log(
+        "[LocalReasoningBridge] Reasoning prompt built, length:",
+        reasoningPrompt.length,
+      );
+
       debugLogger.logReasoning("LOCAL_BRIDGE_PROMPT", {
         promptLength: reasoningPrompt.length,
         hasAgentName: !!agentName,
-        hasCustomPrompts: !!customPrompts
+        hasCustomPrompts: !!customPrompts,
       });
-      
+
       const inferenceConfig = {
         maxTokens: config.maxTokens || this.calculateMaxTokens(text.length),
         temperature: config.temperature || 0.7,
@@ -55,37 +69,50 @@ class LocalReasoningService {
         repeatPenalty: config.repeatPenalty || 1.1,
         contextSize: config.contextSize || 4096,
         threads: config.threads || 4,
-        systemPrompt: "You are a helpful AI assistant that processes and improves text."
+        systemPrompt:
+          "You are a helpful AI assistant that processes and improves text.",
       };
-      
+
       debugLogger.logReasoning("LOCAL_BRIDGE_INFERENCE", {
         modelId,
-        config: inferenceConfig
+        config: inferenceConfig,
       });
-      
+
       // Run inference
-      const result = await modelManager.runInference(modelId, reasoningPrompt, inferenceConfig);
-      
+      console.log(
+        "[LocalReasoningBridge] Calling modelManager.runInference...",
+      );
+      const result = await modelManager.runInference(
+        modelId,
+        reasoningPrompt,
+        inferenceConfig,
+      );
+      console.log(
+        "[LocalReasoningBridge] runInference returned, resultLength:",
+        result?.length,
+      );
+
       const processingTime = Date.now() - startTime;
-      
+
       debugLogger.logReasoning("LOCAL_BRIDGE_SUCCESS", {
         modelId,
         processingTimeMs: processingTime,
         resultLength: result.length,
-        resultPreview: result.substring(0, 100) + (result.length > 100 ? "..." : "")
+        resultPreview:
+          result.substring(0, 100) + (result.length > 100 ? "..." : ""),
       });
 
       return result;
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      
+
       debugLogger.logReasoning("LOCAL_BRIDGE_ERROR", {
         modelId,
         processingTimeMs: processingTime,
         error: error.message,
-        stack: error.stack
+        stack: error.stack,
       });
-      
+
       throw error;
     } finally {
       this.isProcessing = false;
@@ -117,15 +144,20 @@ class LocalReasoningService {
         .replace(/\{\{agentName\}\}/g, agentName)
         .replace(/\{\{text\}\}/g, text);
     }
-    
+
     return regularPrompt.replace(/\{\{text\}\}/g, text);
   }
 
-  calculateMaxTokens(textLength, minTokens = 100, maxTokens = 2048, multiplier = 2) {
+  calculateMaxTokens(
+    textLength,
+    minTokens = 100,
+    maxTokens = 2048,
+    multiplier = 2,
+  ) {
     return Math.max(minTokens, Math.min(textLength * multiplier, maxTokens));
   }
 }
 
 module.exports = {
-  default: new LocalReasoningService()
+  default: new LocalReasoningService(),
 };

@@ -1,9 +1,10 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 
 export interface UsePermissionsReturn {
   // State
   micPermissionGranted: boolean;
   accessibilityPermissionGranted: boolean;
+  isTestingAccessibility: boolean;
 
   requestMicPermission: () => Promise<void>;
   testAccessibilityPermission: () => Promise<void>;
@@ -16,11 +17,18 @@ export interface UsePermissionsProps {
 }
 
 export const usePermissions = (
-  showAlertDialog?: UsePermissionsProps["showAlertDialog"]
+  showAlertDialog?: UsePermissionsProps["showAlertDialog"],
 ): UsePermissionsReturn => {
   const [micPermissionGranted, setMicPermissionGranted] = useState(false);
   const [accessibilityPermissionGranted, setAccessibilityPermissionGranted] =
     useState(false);
+  const [isTestingAccessibility, setIsTestingAccessibility] = useState(false);
+  const testInProgressRef = useRef(false);
+
+  // Detect Wayland session
+  const isWayland = useMemo(() => {
+    return window.electronAPI?.isWayland?.() ?? false;
+  }, []);
 
   const requestMicPermission = useCallback(async () => {
     try {
@@ -41,39 +49,82 @@ export const usePermissions = (
   }, [showAlertDialog]);
 
   const testAccessibilityPermission = useCallback(async () => {
+    // Prevent multiple simultaneous calls
+    if (testInProgressRef.current) {
+      return;
+    }
+    testInProgressRef.current = true;
+    setIsTestingAccessibility(true);
+
+    // Use descriptive test text that users will recognize
+    const testText = "[OpenWhispr Test]";
+
     try {
-      await window.electronAPI.pasteText("OpenWhispr accessibility test");
+      await window.electronAPI.pasteText(testText);
       setAccessibilityPermissionGranted(true);
       if (showAlertDialog) {
-        showAlertDialog({
-          title: "✅ Accessibility Test Successful",
-          description:
-            "Accessibility permissions working! Check if the test text appeared in another app.",
-        });
+        if (isWayland) {
+          showAlertDialog({
+            title: "✅ Text Input Test Successful",
+            description:
+              "ydotool is working! Check if the test text appeared in another app. If not, make sure ydotool daemon is running and you're in the 'input' group.",
+          });
+        } else {
+          showAlertDialog({
+            title: "✅ Accessibility Test Successful",
+            description:
+              "Accessibility permissions working! Check if the test text appeared in another app.",
+          });
+        }
       } else {
         alert(
-          "✅ Accessibility permissions working! Check if the test text appeared in another app."
+          isWayland
+            ? "✅ ydotool working! Check if the test text appeared in another app."
+            : "✅ Accessibility permissions working! Check if the test text appeared in another app.",
         );
       }
-    } catch (err) {
-      console.error("Accessibility permission test failed:", err);
+    } catch (err: unknown) {
+      console.error("Accessibility/text input test failed:", err);
+      const errorMessage =
+        err instanceof Error ? err.message : "Unknown error occurred";
+
       if (showAlertDialog) {
-        showAlertDialog({
-          title: "❌ Accessibility Permissions Needed",
-          description:
-            "Please grant accessibility permissions in System Settings to enable automatic text pasting.",
-        });
+        if (isWayland) {
+          // Check if it's specifically the paste simulation failure
+          const isYdotoolMissing =
+            errorMessage.includes("PASTE_SIMULATION_FAILED") ||
+            errorMessage.includes("ydotool");
+
+          showAlertDialog({
+            title: "❌ Text Input Failed",
+            description: isYdotoolMissing
+              ? "ydotool is not configured correctly. Please ensure:\n\n1. ydotool is installed\n2. The ydotool daemon is running (sudo systemctl start ydotool)\n3. Your user is in the 'input' group (sudo usermod -aG input $USER)\n4. You've logged out and back in after group changes"
+              : `Text input failed: ${errorMessage}. Make sure ydotool is installed and configured.`,
+          });
+        } else {
+          showAlertDialog({
+            title: "❌ Accessibility Permissions Needed",
+            description:
+              "Please grant accessibility permissions in System Settings to enable automatic text pasting.",
+          });
+        }
       } else {
         alert(
-          "❌ Accessibility permissions needed! Please grant them in System Settings."
+          isWayland
+            ? "❌ ydotool not working! Please check the Settings page for setup instructions."
+            : "❌ Accessibility permissions needed! Please grant them in System Settings.",
         );
       }
+    } finally {
+      testInProgressRef.current = false;
+      setIsTestingAccessibility(false);
     }
-  }, [showAlertDialog]);
+  }, [showAlertDialog, isWayland]);
 
   return {
     micPermissionGranted,
     accessibilityPermissionGranted,
+    isTestingAccessibility,
     requestMicPermission,
     testAccessibilityPermission,
     setMicPermissionGranted,

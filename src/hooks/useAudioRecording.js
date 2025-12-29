@@ -10,13 +10,27 @@ export const useAudioRecording = (toast, options = {}) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [transcript, setTranscript] = useState("");
   const audioManagerRef = useRef(null);
-  const { onToggle } = options;
+  const onToggleRef = useRef(options.onToggle);
+  const toastRef = useRef(toast);
 
+  // Keep refs updated
+  onToggleRef.current = options.onToggle;
+  toastRef.current = toast;
+
+  // Initialize AudioManager only once
   useEffect(() => {
-    // Initialize AudioManager
-    audioManagerRef.current = new AudioManager();
+    console.log(
+      "[useAudioRecording] useEffect running, audioManagerRef:",
+      !!audioManagerRef.current,
+    );
 
-    // Set up callbacks
+    // Initialize AudioManager only if not already initialized
+    if (!audioManagerRef.current) {
+      console.log("[useAudioRecording] Creating new AudioManager");
+      audioManagerRef.current = new AudioManager();
+    }
+
+    // Set up callbacks (using refs to always have latest values)
     audioManagerRef.current.setCallbacks({
       onStateChange: ({ isRecording, isProcessing }) => {
         setIsRecording(isRecording);
@@ -28,7 +42,7 @@ export const useAudioRecording = (toast, options = {}) => {
         }
       },
       onError: (error) => {
-        toast({
+        toastRef.current?.({
           title: error.title,
           description: error.description,
           variant: "destructive",
@@ -49,7 +63,7 @@ export const useAudioRecording = (toast, options = {}) => {
             result.source === "openai" &&
             localStorage.getItem("useLocalWhisper") === "true"
           ) {
-            toast({
+            toastRef.current?.({
               title: "Fallback Mode",
               description: "Local Whisper failed. Used OpenAI API instead.",
               variant: "default",
@@ -65,31 +79,35 @@ export const useAudioRecording = (toast, options = {}) => {
     });
 
     // Set up hotkey listener
-    let recording = false;
     const handleToggle = () => {
-      const currentState = audioManagerRef.current.getState();
-
-      if (
-        !recording &&
-        !currentState.isRecording &&
-        !currentState.isProcessing
-      ) {
-        audioManagerRef.current.startRecording();
-        recording = true;
-      } else if (currentState.isRecording) {
-        audioManagerRef.current.stopRecording();
-        recording = false;
+      if (!audioManagerRef.current) {
+        console.error("[useAudioRecording] audioManagerRef.current is null!");
+        return;
       }
+      const currentState = audioManagerRef.current.getState();
+      console.log(
+        "[useAudioRecording] handleToggle called, state:",
+        currentState,
+      );
+
+      if (!currentState.isRecording && !currentState.isProcessing) {
+        console.log("[useAudioRecording] Starting recording...");
+        audioManagerRef.current.startRecording();
+      } else if (currentState.isRecording) {
+        console.log("[useAudioRecording] Stopping recording...");
+        audioManagerRef.current.stopRecording();
+      } else {
+        console.log("[useAudioRecording] Cannot toggle - still processing");
+      }
+      // Always call onToggle callback
+      onToggleRef.current?.();
     };
 
-    const disposeToggle = window.electronAPI.onToggleDictation(() => {
-      handleToggle();
-      onToggle?.();
-    });
+    const disposeToggle = window.electronAPI.onToggleDictation(handleToggle);
 
     // Set up no-audio-detected listener
     const handleNoAudioDetected = () => {
-      toast({
+      toastRef.current?.({
         title: "No Audio Detected",
         description:
           "The recording contained no detectable audio. Please try again.",
@@ -101,15 +119,19 @@ export const useAudioRecording = (toast, options = {}) => {
       handleNoAudioDetected,
     );
 
-    // Cleanup
+    console.log("[useAudioRecording] Listener registered");
+
+    // Cleanup only on unmount
     return () => {
+      console.log("[useAudioRecording] Cleanup running - disposing listeners");
       disposeToggle?.();
       disposeNoAudio?.();
       if (audioManagerRef.current) {
         audioManagerRef.current.cleanup();
+        audioManagerRef.current = null;
       }
     };
-  }, [toast, onToggle]);
+  }, []); // Empty dependencies - only run once on mount
 
   const startRecording = async () => {
     if (audioManagerRef.current) {

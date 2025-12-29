@@ -141,37 +141,37 @@ class IPCHandlers {
     ipcMain.handle(
       "transcribe-local-whisper",
       async (event, audioBlob, options = {}) => {
-        debugLogger.log('transcribe-local-whisper called', {
+        debugLogger.log("transcribe-local-whisper called", {
           audioBlobType: typeof audioBlob,
           audioBlobSize: audioBlob?.byteLength || audioBlob?.length || 0,
-          options
+          options,
         });
-        
+
         try {
           const result = await this.whisperManager.transcribeLocalWhisper(
             audioBlob,
-            options
+            options,
           );
 
-          debugLogger.log('Whisper result', {
+          debugLogger.log("Whisper result", {
             success: result.success,
             hasText: !!result.text,
             message: result.message,
-            error: result.error
+            error: result.error,
           });
-          
+
           // Check if no audio was detected and send appropriate event
           if (!result.success && result.message === "No audio detected") {
-            debugLogger.log('Sending no-audio-detected event to renderer');
+            debugLogger.log("Sending no-audio-detected event to renderer");
             event.sender.send("no-audio-detected");
           }
 
           return result;
         } catch (error) {
-          debugLogger.error('Local Whisper transcription error', error);
+          debugLogger.error("Local Whisper transcription error", error);
           throw error;
         }
-      }
+      },
     );
 
     ipcMain.handle("check-whisper-installation", async (event) => {
@@ -234,7 +234,7 @@ class IPCHandlers {
           (progressData) => {
             // Forward progress updates to the renderer
             event.sender.send("whisper-download-progress", progressData);
-          }
+          },
         );
 
         // Send completion event
@@ -246,7 +246,6 @@ class IPCHandlers {
 
         return result;
       } catch (error) {
-
         // Send error event
         event.sender.send("whisper-download-progress", {
           type: "error",
@@ -313,13 +312,13 @@ class IPCHandlers {
     // Model management handlers
     ipcMain.handle("model-get-all", async () => {
       try {
-        console.log('[IPC] model-get-all called');
+        console.log("[IPC] model-get-all called");
         const modelManager = require("./modelManagerBridge").default;
         const models = await modelManager.getModelsWithStatus();
-        console.log('[IPC] Returning models:', models.length);
+        console.log("[IPC] Returning models:", models.length);
         return models;
       } catch (error) {
-        console.error('[IPC] Error in model-get-all:', error);
+        console.error("[IPC] Error in model-get-all:", error);
         throw error;
       }
     });
@@ -341,15 +340,15 @@ class IPCHandlers {
               downloadedSize,
               totalSize,
             });
-          }
+          },
         );
         return { success: true, path: result };
       } catch (error) {
-        return { 
-          success: false, 
+        return {
+          success: false,
           error: error.message,
           code: error.code,
-          details: error.details 
+          details: error.details,
         };
       }
     });
@@ -360,11 +359,11 @@ class IPCHandlers {
         await modelManager.deleteModel(modelId);
         return { success: true };
       } catch (error) {
-        return { 
-          success: false, 
+        return {
+          success: false,
           error: error.message,
           code: error.code,
-          details: error.details 
+          details: error.details,
         };
       }
     });
@@ -390,11 +389,11 @@ class IPCHandlers {
         await modelManager.ensureLlamaCpp();
         return { available: true };
       } catch (error) {
-        return { 
-          available: false, 
+        return {
+          available: false,
           error: error.message,
           code: error.code,
-          details: error.details 
+          details: error.details,
         };
       }
     });
@@ -416,72 +415,111 @@ class IPCHandlers {
     });
 
     // Local reasoning handler
-    ipcMain.handle("process-local-reasoning", async (event, text, modelId, agentName, config) => {
-      try {
-        const LocalReasoningService = require("../services/localReasoningBridge").default;
-        const result = await LocalReasoningService.processText(text, modelId, agentName, config);
-        return { success: true, text: result };
-      } catch (error) {
-        return { success: false, error: error.message };
-      }
-    });
-
-    // Anthropic reasoning handler
-    ipcMain.handle("process-anthropic-reasoning", async (event, text, modelId, agentName, config) => {
-      try {
-        const apiKey = this.environmentManager.getAnthropicKey();
-        
-        if (!apiKey) {
-          throw new Error("Anthropic API key not configured");
-        }
-
-        const systemPrompt = "You are a dictation assistant. Clean up text by fixing grammar and punctuation. Output ONLY the cleaned text without any explanations, options, or commentary.";
-        const userPrompt = agentName && text.toLowerCase().includes(agentName.toLowerCase())
-          ? `You are ${agentName}, a helpful AI assistant. Clean up the following dictated text by fixing grammar, punctuation, and formatting. Remove any reference to your name. Output ONLY the cleaned text without explanations or options:\n\n${text}`
-          : `Clean up the following dictated text by fixing grammar, punctuation, and formatting. Output ONLY the cleaned text without any explanations, options, or commentary:\n\n${text}`;
-
-        const requestBody = {
-          model: modelId || "claude-3-5-sonnet-20241022",
-          messages: [{ role: "user", content: userPrompt }],
-          system: systemPrompt,
-          max_tokens: config?.maxTokens || Math.max(100, Math.min(text.length * 2, 4096)),
-          temperature: config?.temperature || 0.3,
-        };
-
-        const response = await fetch("https://api.anthropic.com/v1/messages", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-API-Key": apiKey,
-            "anthropic-version": "2023-06-01",
-          },
-          body: JSON.stringify(requestBody),
+    ipcMain.handle(
+      "process-local-reasoning",
+      async (event, text, modelId, agentName, config) => {
+        const debugLogger = require("./debugLogger");
+        debugLogger.log("[IPC] process-local-reasoning START", {
+          modelId,
+          textLength: text?.length,
         });
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          let errorData = { error: response.statusText };
-          try {
-            errorData = JSON.parse(errorText);
-          } catch {
-            errorData = { error: errorText || response.statusText };
-          }
-          throw new Error(errorData.error?.message || errorData.error || `Anthropic API error: ${response.status}`);
+        try {
+          const LocalReasoningService =
+            require("../services/localReasoningBridge").default;
+          const result = await LocalReasoningService.processText(
+            text,
+            modelId,
+            agentName,
+            config,
+          );
+
+          debugLogger.log("[IPC] process-local-reasoning SUCCESS", {
+            resultLength: result?.length,
+            resultPreview: result?.substring(0, 100),
+          });
+
+          return { success: true, text: result };
+        } catch (error) {
+          debugLogger.error(
+            "[IPC] process-local-reasoning ERROR",
+            error.message,
+          );
+          return { success: false, error: error.message };
         }
+      },
+    );
 
-        const data = await response.json();
-        return { success: true, text: data.content[0].text.trim() };
-      } catch (error) {
-        debugLogger.error("Anthropic reasoning error:", error);
-        return { success: false, error: error.message };
-      }
-    });
+    // Anthropic reasoning handler
+    ipcMain.handle(
+      "process-anthropic-reasoning",
+      async (event, text, modelId, agentName, config) => {
+        try {
+          const apiKey = this.environmentManager.getAnthropicKey();
 
+          if (!apiKey) {
+            throw new Error("Anthropic API key not configured");
+          }
+
+          const systemPrompt =
+            "You are a dictation assistant. Clean up text by fixing grammar and punctuation. Output ONLY the cleaned text without any explanations, options, or commentary.";
+          const userPrompt =
+            agentName && text.toLowerCase().includes(agentName.toLowerCase())
+              ? `You are ${agentName}, a helpful AI assistant. Clean up the following dictated text by fixing grammar, punctuation, and formatting. Remove any reference to your name. Output ONLY the cleaned text without explanations or options:\n\n${text}`
+              : `Clean up the following dictated text by fixing grammar, punctuation, and formatting. Output ONLY the cleaned text without any explanations, options, or commentary:\n\n${text}`;
+
+          const requestBody = {
+            model: modelId || "claude-3-5-sonnet-20241022",
+            messages: [{ role: "user", content: userPrompt }],
+            system: systemPrompt,
+            max_tokens:
+              config?.maxTokens ||
+              Math.max(100, Math.min(text.length * 2, 4096)),
+            temperature: config?.temperature || 0.3,
+          };
+
+          const response = await fetch(
+            "https://api.anthropic.com/v1/messages",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-API-Key": apiKey,
+                "anthropic-version": "2023-06-01",
+              },
+              body: JSON.stringify(requestBody),
+            },
+          );
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            let errorData = { error: response.statusText };
+            try {
+              errorData = JSON.parse(errorText);
+            } catch {
+              errorData = { error: errorText || response.statusText };
+            }
+            throw new Error(
+              errorData.error?.message ||
+                errorData.error ||
+                `Anthropic API error: ${response.status}`,
+            );
+          }
+
+          const data = await response.json();
+          return { success: true, text: data.content[0].text.trim() };
+        } catch (error) {
+          debugLogger.error("Anthropic reasoning error:", error);
+          return { success: false, error: error.message };
+        }
+      },
+    );
 
     // Check if local reasoning is available
     ipcMain.handle("check-local-reasoning-available", async () => {
       try {
-        const LocalReasoningService = require("../services/localReasoningBridge").default;
+        const LocalReasoningService =
+          require("../services/localReasoningBridge").default;
         return await LocalReasoningService.isAvailable();
       } catch (error) {
         return false;
@@ -493,7 +531,9 @@ class IPCHandlers {
       try {
         const llamaCppInstaller = require("./llamaCppInstaller").default;
         const isInstalled = await llamaCppInstaller.isInstalled();
-        const version = isInstalled ? await llamaCppInstaller.getVersion() : null;
+        const version = isInstalled
+          ? await llamaCppInstaller.getVersion()
+          : null;
         return { isInstalled, version };
       } catch (error) {
         return { isInstalled: false, error: error.message };
@@ -521,6 +561,10 @@ class IPCHandlers {
 
     // Debug logging handler for reasoning pipeline
     ipcMain.handle("log-reasoning", async (event, stage, details) => {
+      // Always log silence detection info to help debug
+      if (stage.startsWith("SILENCE_") || stage.startsWith("AUDIO_")) {
+        console.log(`[SilenceDetection] ${stage}:`, JSON.stringify(details));
+      }
       debugLogger.logReasoning(stage, details);
       return { success: true };
     });

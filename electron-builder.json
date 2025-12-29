@@ -15,6 +15,8 @@
     "src/dist/**/*",
     "src/helpers/**/*",
     "src/hooks/**/*",
+    "src/models/**/*",
+    "src/services/**/*",
     "src/types/**/*",
     "src/utils.js",
     "src/utils/**/*",
@@ -58,19 +60,11 @@
     }
   },
   "win": {
-    "target": [
-      "nsis",
-      "portable"
-    ],
+    "target": ["nsis", "portable"],
     "icon": "src/assets/icon.ico"
   },
   "linux": {
-    "target": [
-      "AppImage",
-      "deb",
-      "rpm",
-      "tar.gz"
-    ],
+    "target": ["AppImage", "deb", "rpm", "tar.gz"],
     "icon": "src/assets/icon.png",
     "category": "Utility",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"

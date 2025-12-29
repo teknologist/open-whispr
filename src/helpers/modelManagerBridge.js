@@ -439,21 +439,33 @@ class ModelManager {
   }
 
   async runInference(modelId, prompt, options = {}) {
+    console.log("[ModelManagerBridge] runInference START", {
+      modelId,
+      promptLength: prompt?.length,
+    });
     await this.ensureLlamaCpp();
+    console.log(
+      "[ModelManagerBridge] ensureLlamaCpp done, path:",
+      this.llamaCppPath,
+    );
 
     const modelInfo = this.findModelById(modelId);
     if (!modelInfo) {
+      console.log("[ModelManagerBridge] Model not found:", modelId);
       throw new ModelNotFoundError(modelId);
     }
+    console.log("[ModelManagerBridge] Found model:", modelInfo.model.fileName);
 
     const modelPath = path.join(this.modelsDir, modelInfo.model.fileName);
     if (!(await this.checkFileExists(modelPath))) {
+      console.log("[ModelManagerBridge] Model file not found:", modelPath);
       throw new ModelError(
         `Model ${modelId} is not downloaded`,
         "MODEL_NOT_DOWNLOADED",
         { modelId },
       );
     }
+    console.log("[ModelManagerBridge] Model file exists:", modelPath);
 
     // Format the prompt based on the provider
     const formattedPrompt = this.formatPrompt(
@@ -461,11 +473,16 @@ class ModelManager {
       prompt,
       options.systemPrompt || "",
     );
+    console.log(
+      "[ModelManagerBridge] Formatted prompt length:",
+      formattedPrompt?.length,
+    );
 
     // Run inference with llama.cpp
     const gpuLayers = options.gpuLayers ?? 99; // Default to full GPU offload
 
     return new Promise((resolve, reject) => {
+      console.log("[ModelManagerBridge] About to spawn llama.cpp process");
       const args = [
         "-m",
         modelPath,
@@ -488,6 +505,8 @@ class ModelManager {
         "-ngl",
         String(gpuLayers),
         "--no-display-prompt",
+        "--single-turn", // Exit after one generation (don't stay in conversation mode)
+        "--simple-io", // Use basic IO for subprocess compatibility (output to stdout)
       ];
 
       debugLogger.log(
@@ -495,23 +514,43 @@ class ModelManager {
       );
       debugLogger.log(`[ModelManager] llama.cpp args:`, args.join(" "));
 
-      const process = spawn(this.llamaCppPath, args);
+      console.log("[ModelManagerBridge] Spawning:", this.llamaCppPath);
+      const inferenceProcess = spawn(this.llamaCppPath, args);
+      console.log(
+        "[ModelManagerBridge] Process spawned, pid:",
+        inferenceProcess.pid,
+      );
       let output = "";
       let error = "";
 
-      process.stdout.on("data", (data) => {
-        output += data.toString();
+      inferenceProcess.stdout.on("data", (data) => {
+        const chunk = data.toString();
+        console.log(
+          "[ModelManagerBridge] stdout chunk:",
+          chunk.substring(0, 100),
+        );
+        output += chunk;
       });
 
-      process.stderr.on("data", (data) => {
+      inferenceProcess.stderr.on("data", (data) => {
         const chunk = data.toString();
         error += chunk;
         // Log stderr which contains GPU/CUDA info from llama.cpp
+        console.log(
+          "[ModelManagerBridge] stderr:",
+          chunk.trim().substring(0, 200),
+        );
         debugLogger.log(`[ModelManager] llama.cpp: ${chunk.trim()}`);
       });
 
-      process.on("close", (code) => {
+      inferenceProcess.on("close", (code) => {
+        console.log("[ModelManagerBridge] Process closed with code:", code);
+        console.log("[ModelManagerBridge] Raw output length:", output.length);
         if (code !== 0) {
+          console.log(
+            "[ModelManagerBridge] Inference failed, error:",
+            error.substring(0, 500),
+          );
           reject(
             new ModelError(
               `Inference failed with code ${code}: ${error}`,
@@ -520,11 +559,18 @@ class ModelManager {
             ),
           );
         } else {
-          resolve(output.trim());
+          // Clean the output: remove llama.cpp banner and timing info
+          const cleanedOutput = this.cleanLlamaOutput(output);
+          console.log(
+            "[ModelManagerBridge] Cleaned output:",
+            cleanedOutput.substring(0, 200),
+          );
+          resolve(cleanedOutput);
         }
       });
 
-      process.on("error", (err) => {
+      inferenceProcess.on("error", (err) => {
+        console.log("[ModelManagerBridge] Process error:", err.message);
         reject(
           new ModelError(
             `Failed to start inference: ${err.message}`,
@@ -564,6 +610,74 @@ class ModelManager {
           { providerId: provider.id },
         );
     }
+  }
+
+  /**
+   * Clean llama.cpp output by removing banner, timing info, prompt tokens, and other noise
+   * @param {string} output - Raw output from llama.cpp
+   * @returns {string} - Cleaned output containing only the generated text
+   */
+  cleanLlamaOutput(output) {
+    if (!output) return "";
+
+    let cleaned = output;
+
+    // Remove the llama.cpp ASCII art banner (contains ██ characters)
+    // The banner ends after the last line with box-drawing characters
+    const bannerEndPatterns = [
+      /Loading model\.\.\.[\s\S]*?▀▀    ▀▀\s*/,
+      /▄▄[\s\S]*?▀▀    ▀▀\s*/,
+    ];
+    for (const pattern of bannerEndPatterns) {
+      cleaned = cleaned.replace(pattern, "");
+    }
+
+    // Remove the entire prompt section (everything up to and including the assistant header)
+    // This handles Llama format: <|begin_of_text|>...<|start_header_id|>assistant<|end_header_id|>
+    cleaned = cleaned.replace(
+      /<\|begin_of_text\|>[\s\S]*?<\|start_header_id\|>assistant<\|end_header_id\|>\s*/g,
+      "",
+    );
+
+    // Also handle ChatML format: <|im_start|>assistant
+    cleaned = cleaned.replace(
+      /<\|im_start\|>system[\s\S]*?<\|im_start\|>assistant\s*/g,
+      "",
+    );
+
+    // Handle Mistral format: [INST]...[/INST]
+    cleaned = cleaned.replace(/\[INST\][\s\S]*?\[\/INST\]\s*/g, "");
+
+    // Remove any remaining special tokens
+    cleaned = cleaned.replace(/<\|[^|]+\|>/g, "");
+
+    // Remove timing info: [ Prompt: X t/s | Generation: Y t/s ]
+    cleaned = cleaned.replace(
+      /\[\s*Prompt:\s*[\d.]+\s*t\/s\s*\|\s*Generation:\s*[\d.]+\s*t\/s\s*\]/g,
+      "",
+    );
+
+    // Remove "Exiting..." message
+    cleaned = cleaned.replace(/Exiting\.\.\.\s*/g, "");
+
+    // Remove any "build" and "model" info lines
+    cleaned = cleaned.replace(/build\s*:\s*\S+\s*/g, "");
+    cleaned = cleaned.replace(/model\s*:\s*\S+\s*/g, "");
+    cleaned = cleaned.replace(/modalities\s*:\s*\S+\s*/g, "");
+
+    // Remove "available commands" section
+    cleaned = cleaned.replace(
+      /available commands:[\s\S]*?\/read[^\n]*\n*/g,
+      "",
+    );
+
+    // Remove any remaining > prompt markers
+    cleaned = cleaned.replace(/^>\s*/gm, "");
+
+    // Trim whitespace
+    cleaned = cleaned.trim();
+
+    return cleaned;
   }
 }
 

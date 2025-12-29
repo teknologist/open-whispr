@@ -68,6 +68,21 @@ class AudioManager {
 
   // Check if current audio level is silence using RMS for accuracy
   checkAudioLevel() {
+    // Debug: log first call to verify interval is running
+    if (!this._firstCheckLogged) {
+      this._firstCheckLogged = true;
+      console.log("[AudioManager] checkAudioLevel first call:", {
+        hasAnalyser: !!this.analyser,
+        isRecording: this.isRecording,
+        cachedSettings: this.cachedSilenceSettings,
+      });
+      window.electronAPI?.logReasoning?.("SILENCE_FIRST_CHECK", {
+        hasAnalyser: !!this.analyser,
+        isRecording: this.isRecording,
+        cachedSettings: this.cachedSilenceSettings,
+      });
+    }
+
     if (!this.analyser || !this.isRecording) return;
 
     // Use cached settings to avoid repeated localStorage reads
@@ -86,6 +101,25 @@ class AudioManager {
       ) / timeDomainArray.length,
     );
 
+    // Debug log every 3 seconds to avoid spam (every 30 checks at 100ms interval)
+    if (!this._debugLogCounter) this._debugLogCounter = 0;
+    this._debugLogCounter++;
+    if (this._debugLogCounter % 30 === 0) {
+      const logData = {
+        rms: rms.toFixed(4),
+        amplitudeThreshold: SILENCE_AMPLITUDE_THRESHOLD,
+        isSilence: rms < SILENCE_AMPLITUDE_THRESHOLD,
+        hasDetectedSpeech: this.hasDetectedSpeech,
+        silenceDurationMs: this.silenceStartTime
+          ? Date.now() - this.silenceStartTime
+          : 0,
+        configuredThresholdMs: threshold,
+      };
+      console.log("[AudioManager] Audio level check:", logData);
+      // Also log via IPC to terminal
+      window.electronAPI?.logReasoning?.("AUDIO_LEVEL_CHECK", logData);
+    }
+
     if (rms < SILENCE_AMPLITUDE_THRESHOLD) {
       // Currently silence
       if (!this.silenceStartTime) {
@@ -94,6 +128,11 @@ class AudioManager {
         // Only auto-stop after we've detected some speech
         const silenceDuration = Date.now() - this.silenceStartTime;
         if (silenceDuration >= threshold) {
+          console.log(
+            "[AudioManager] Auto-stopping due to silence after",
+            silenceDuration,
+            "ms",
+          );
           // Clear interval first to prevent re-triggering (race condition fix)
           if (this.silenceCheckInterval) {
             clearInterval(this.silenceCheckInterval);
@@ -107,6 +146,9 @@ class AudioManager {
       }
     } else {
       // Not silence - reset timer and mark that we've detected speech
+      if (!this.hasDetectedSpeech) {
+        console.log("[AudioManager] Speech detected, RMS:", rms.toFixed(4));
+      }
       this.silenceStartTime = null;
       this.hasDetectedSpeech = true;
     }
@@ -114,12 +156,31 @@ class AudioManager {
 
   // Start monitoring audio levels for silence detection
   startSilenceDetection(stream) {
-    // Cache settings to avoid repeated localStorage reads during monitoring
-    this.cachedSilenceSettings = this.getSilenceSettings();
-    if (!this.cachedSilenceSettings.enabled) return;
+    // Get settings first to check if enabled (before cleanup which clears cache)
+    const settings = this.getSilenceSettings();
+
+    // Log via IPC to show in terminal (renderer console.log only shows in DevTools)
+    const logMsg = `SILENCE_SETTINGS: enabled=${settings.enabled}, threshold=${settings.threshold}ms`;
+    console.log("[AudioManager]", logMsg);
+    window.electronAPI?.logReasoning?.("SILENCE_DETECTION_INIT", {
+      ...settings,
+      rawLocalStorage: {
+        silenceAutoStop: localStorage.getItem("silenceAutoStop"),
+        silenceThreshold: localStorage.getItem("silenceThreshold"),
+      },
+    });
+
+    if (!settings.enabled) {
+      console.log("[AudioManager] Silence detection is disabled");
+      this.cachedSilenceSettings = null; // Clear cache when disabled
+      return;
+    }
 
     // Clean up any existing detection first (prevents AudioContext accumulation)
     this.stopSilenceDetection();
+
+    // Cache settings AFTER cleanup (stopSilenceDetection clears cachedSilenceSettings)
+    this.cachedSilenceSettings = settings;
 
     try {
       this.audioContext = new (
@@ -136,11 +197,15 @@ class AudioManager {
       // Reset silence tracking
       this.silenceStartTime = null;
       this.hasDetectedSpeech = false;
+      this._firstCheckLogged = false; // Reset debug flag for new recording
+      this._debugLogCounter = 0; // Reset counter
 
       // Start checking audio levels
       this.silenceCheckInterval = setInterval(() => {
         this.checkAudioLevel();
       }, SILENCE_CHECK_INTERVAL_MS);
+
+      console.log("[AudioManager] Silence detection started successfully");
     } catch (error) {
       console.warn("[AudioManager] Failed to start silence detection:", error);
       // Notify user that the feature isn't working
@@ -203,26 +268,38 @@ class AudioManager {
       };
 
       this.mediaRecorder.onstop = async () => {
+        console.log("[AudioManager] onstop callback triggered");
         // Stop silence detection immediately
         this.stopSilenceDetection();
 
         this.isRecording = false;
         this.isProcessing = true;
+        console.log(
+          "[AudioManager] Calling onStateChange with isProcessing=true",
+        );
         this.onStateChange?.({ isRecording: false, isProcessing: true });
 
         const audioBlob = new Blob(this.audioChunks, { type: "audio/wav" });
+        console.log("[AudioManager] audioBlob created, size:", audioBlob.size);
 
         if (audioBlob.size === 0) {
+          console.log("[AudioManager] WARNING: audioBlob is empty!");
         }
 
         const durationSeconds = this.recordingStartTime
           ? (Date.now() - this.recordingStartTime) / 1000
           : null;
         this.recordingStartTime = null;
+        console.log(
+          "[AudioManager] About to call processAudio, duration:",
+          durationSeconds,
+        );
         await this.processAudio(audioBlob, { durationSeconds });
+        console.log("[AudioManager] processAudio completed");
 
         // Clean up stream
         stream.getTracks().forEach((track) => track.stop());
+        console.log("[AudioManager] Stream tracks stopped");
       };
 
       this.mediaRecorder.start();
@@ -334,6 +411,7 @@ class AudioManager {
   }
 
   async processWithLocalWhisper(audioBlob, model = "base", metadata = {}) {
+    console.log("[AudioManager] processWithLocalWhisper START");
     try {
       const arrayBuffer = await audioBlob.arrayBuffer();
       const language = localStorage.getItem("preferredLanguage");
@@ -341,14 +419,28 @@ class AudioManager {
       if (language && language !== "auto") {
         options.language = language;
       }
+      console.log("[AudioManager] Calling transcribeLocalWhisper IPC...");
 
       const result = await window.electronAPI.transcribeLocalWhisper(
         arrayBuffer,
         options,
       );
+      console.log("[AudioManager] transcribeLocalWhisper IPC returned:", {
+        success: result?.success,
+        text: result?.text?.substring(0, 100),
+        error: result?.error,
+      });
 
       if (result.success && result.text) {
+        console.log(
+          "[AudioManager] Calling processTranscription with text:",
+          result.text.substring(0, 100),
+        );
         const text = await this.processTranscription(result.text, "local");
+        console.log(
+          "[AudioManager] processTranscription returned:",
+          text?.substring(0, 100),
+        );
         if (text !== null && text !== undefined) {
           return { success: true, text: text || result.text, source: "local" };
         } else {

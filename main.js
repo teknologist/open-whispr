@@ -1,5 +1,16 @@
 const { app, globalShortcut, BrowserWindow, dialog } = require("electron");
 
+// Enable transparent windows on Linux (native Wayland)
+if (process.platform === "linux") {
+  app.commandLine.appendSwitch(
+    "enable-features",
+    "UseOzonePlatform,WaylandWindowDecorations",
+  );
+  app.commandLine.appendSwitch("ozone-platform-hint", "auto");
+  app.commandLine.appendSwitch("enable-transparent-visuals");
+  app.disableHardwareAcceleration();
+}
+
 // Ensure macOS menus use the proper casing for the app name
 if (process.platform === "darwin" && app.getName() !== "OpenWhispr") {
   app.setName("OpenWhispr");
@@ -34,24 +45,24 @@ const GlobeKeyManager = require("./src/helpers/globeKeyManager");
 
 // Set up PATH for production builds to find system Python
 function setupProductionPath() {
-  if (process.platform === 'darwin' && process.env.NODE_ENV !== 'development') {
+  if (process.platform === "darwin" && process.env.NODE_ENV !== "development") {
     const commonPaths = [
-      '/usr/local/bin',
-      '/opt/homebrew/bin',
-      '/usr/bin',
-      '/bin',
-      '/usr/sbin',
-      '/sbin',
-      '/Library/Frameworks/Python.framework/Versions/3.11/bin',
-      '/Library/Frameworks/Python.framework/Versions/3.10/bin',
-      '/Library/Frameworks/Python.framework/Versions/3.9/bin'
+      "/usr/local/bin",
+      "/opt/homebrew/bin",
+      "/usr/bin",
+      "/bin",
+      "/usr/sbin",
+      "/sbin",
+      "/Library/Frameworks/Python.framework/Versions/3.11/bin",
+      "/Library/Frameworks/Python.framework/Versions/3.10/bin",
+      "/Library/Frameworks/Python.framework/Versions/3.9/bin",
     ];
-    
-    const currentPath = process.env.PATH || '';
-    const pathsToAdd = commonPaths.filter(p => !currentPath.includes(p));
-    
+
+    const currentPath = process.env.PATH || "";
+    const pathsToAdd = commonPaths.filter((p) => !currentPath.includes(p));
+
     if (pathsToAdd.length > 0) {
-      process.env.PATH = `${currentPath}:${pathsToAdd.join(':')}`;
+      process.env.PATH = `${currentPath}:${pathsToAdd.join(":")}`;
     }
   }
 }
@@ -59,9 +70,43 @@ function setupProductionPath() {
 // Set up PATH before initializing managers
 setupProductionPath();
 
+// Parse CLI arguments - whitelist allowed arguments for security
+const ALLOWED_CLI_ARGS = ["--toggle", "--debug", "--dev"];
+const cliArgs = process.argv.filter((arg) => ALLOWED_CLI_ARGS.includes(arg));
+const shouldToggleOnStart = cliArgs.includes("--toggle");
+
+// Forward reference for windowManager (needed by second-instance handler)
+let windowManager = null;
+
+// Register second-instance handler BEFORE requesting lock
+// This ensures the running instance receives commands from new instances
+app.on("second-instance", (event, argv) => {
+  console.log("[CLI] Received second-instance event with argv:", argv);
+  if (argv.includes("--toggle")) {
+    console.log("[CLI] Toggle command received, triggering dictation");
+    if (windowManager?.mainWindow && !windowManager.mainWindow.isDestroyed()) {
+      windowManager.showDictationPanel();
+      windowManager.mainWindow.webContents.send("toggle-dictation");
+    } else {
+      console.log("[CLI] Window not ready yet, command ignored");
+    }
+  }
+});
+
+// Single instance lock for CLI integration (e.g., `openwhispr --toggle` from DE shortcut)
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  // Another instance is already running - it will receive our argv via 'second-instance' event
+  console.log(
+    "[CLI] Another instance is running, forwarding command and exiting",
+  );
+  app.exit(0); // Use exit() instead of quit() to stop immediately
+}
+
 // Initialize managers
 const environmentManager = new EnvironmentManager();
-const windowManager = new WindowManager();
+windowManager = new WindowManager();
 const hotkeyManager = windowManager.hotkeyManager;
 const databaseManager = new DatabaseManager();
 const clipboardManager = new ClipboardManager();
@@ -79,14 +124,19 @@ if (process.platform === "darwin") {
     globeKeyAlertShown = true;
 
     const detailLines = [
-      error?.message || "Unknown error occurred while starting the Globe listener.",
+      error?.message ||
+        "Unknown error occurred while starting the Globe listener.",
       "The Globe key shortcut will remain disabled; existing keyboard shortcuts continue to work.",
     ];
 
     if (process.env.NODE_ENV === "development") {
-      detailLines.push("Run `npm run compile:globe` and rebuild the app to regenerate the listener binary.");
+      detailLines.push(
+        "Run `npm run compile:globe` and rebuild the app to regenerate the listener binary.",
+      );
     } else {
-      detailLines.push("Try reinstalling OpenWhispr or contact support if the issue persists.");
+      detailLines.push(
+        "Try reinstalling OpenWhispr or contact support if the issue persists.",
+      );
     }
 
     dialog.showMessageBox({
@@ -115,10 +165,10 @@ async function startApp() {
   }
 
   // Ensure dock is visible on macOS and stays visible
-  if (process.platform === 'darwin' && app.dock) {
+  if (process.platform === "darwin" && app.dock) {
     app.dock.show();
     // Prevent dock from hiding when windows use setVisibleOnAllWorkspaces
-    app.setActivationPolicy('regular');
+    app.setActivationPolicy("regular");
   }
 
   // Initialize Whisper manager at startup (don't await to avoid blocking)
@@ -129,6 +179,18 @@ async function startApp() {
   // Create main window
   try {
     await windowManager.createMainWindow();
+
+    // If started with --toggle, trigger dictation after window is ready
+    if (shouldToggleOnStart && windowManager.mainWindow) {
+      console.log("[CLI] Started with --toggle, will trigger dictation");
+      windowManager.mainWindow.webContents.once("did-finish-load", () => {
+        setTimeout(() => {
+          console.log("[CLI] Triggering dictation on startup");
+          windowManager.showDictationPanel();
+          windowManager.mainWindow.webContents.send("toggle-dictation");
+        }, 500);
+      });
+    }
   } catch (error) {
     console.error("Error creating main window:", error);
   }
@@ -141,26 +203,29 @@ async function startApp() {
   }
 
   // Set up tray
-trayManager.setWindows(
-  windowManager.mainWindow,
-  windowManager.controlPanelWindow
-);
-trayManager.setWindowManager(windowManager);
+  trayManager.setWindows(
+    windowManager.mainWindow,
+    windowManager.controlPanelWindow,
+  );
+  trayManager.setWindowManager(windowManager);
   trayManager.setCreateControlPanelCallback(() =>
-    windowManager.createControlPanelWindow()
+    windowManager.createControlPanelWindow(),
   );
   await trayManager.createTray();
 
   // Set windows for update manager and check for updates
   updateManager.setWindows(
     windowManager.mainWindow,
-    windowManager.controlPanelWindow
+    windowManager.controlPanelWindow,
   );
   updateManager.checkForUpdatesOnStartup();
 
   if (process.platform === "darwin") {
     globeKeyManager.on("globe-down", () => {
-      if (hotkeyManager.getCurrentHotkey && hotkeyManager.getCurrentHotkey() === "GLOBE") {
+      if (
+        hotkeyManager.getCurrentHotkey &&
+        hotkeyManager.getCurrentHotkey() === "GLOBE"
+      ) {
         if (
           windowManager.mainWindow &&
           !windowManager.mainWindow.isDestroyed()
@@ -176,14 +241,20 @@ trayManager.setWindowManager(windowManager);
 }
 
 // App event handlers
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Hide dock icon on macOS for a cleaner experience
   // The app will still show in the menu bar and command bar
-  if (process.platform === 'darwin' && app.dock) {
+  if (process.platform === "darwin" && app.dock) {
     // Keep dock visible for now to maintain command bar access
     // We can hide it later if needed: app.dock.hide()
   }
-  
+
+  // Linux requires a delay before creating transparent windows
+  // See: https://github.com/electron/electron/issues/15947
+  if (process.platform === "linux") {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
   startApp();
 });
 
@@ -198,7 +269,11 @@ app.on("window-all-closed", () => {
 
 app.on("browser-window-focus", (event, window) => {
   // Only apply always-on-top to the dictation window, not the control panel
-  if (windowManager && windowManager.mainWindow && !windowManager.mainWindow.isDestroyed()) {
+  if (
+    windowManager &&
+    windowManager.mainWindow &&
+    !windowManager.mainWindow.isDestroyed()
+  ) {
     // Check if the focused window is the dictation window
     if (window === windowManager.mainWindow) {
       windowManager.enforceMainWindowOnTop();
@@ -218,16 +293,24 @@ app.on("activate", () => {
     }
   } else {
     // Show control panel when dock icon is clicked (most common user action)
-    if (windowManager && windowManager.controlPanelWindow && !windowManager.controlPanelWindow.isDestroyed()) {
+    if (
+      windowManager &&
+      windowManager.controlPanelWindow &&
+      !windowManager.controlPanelWindow.isDestroyed()
+    ) {
       windowManager.controlPanelWindow.show();
       windowManager.controlPanelWindow.focus();
     } else if (windowManager) {
       // If control panel doesn't exist, create it
       windowManager.createControlPanelWindow();
     }
-    
+
     // Ensure dictation panel maintains its always-on-top status
-    if (windowManager && windowManager.mainWindow && !windowManager.mainWindow.isDestroyed()) {
+    if (
+      windowManager &&
+      windowManager.mainWindow &&
+      !windowManager.mainWindow.isDestroyed()
+    ) {
       windowManager.enforceMainWindowOnTop();
     }
   }

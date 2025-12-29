@@ -54,7 +54,7 @@ class WindowManager {
           "Failed to load main window:",
           errorCode,
           errorDescription,
-          validatedURL
+          validatedURL,
         );
         if (
           process.env.NODE_ENV === "development" &&
@@ -69,15 +69,12 @@ class WindowManager {
             }
           }, 2000);
         }
-      }
+      },
     );
 
-    this.mainWindow.webContents.on(
-      "did-finish-load",
-      () => {
-        this.enforceMainWindowOnTop();
-      }
-    );
+    this.mainWindow.webContents.on("did-finish-load", () => {
+      this.enforceMainWindowOnTop();
+    });
   }
 
   setMainWindowInteractivity(shouldCapture) {
@@ -96,20 +93,25 @@ class WindowManager {
 
   async loadMainWindow() {
     const appUrl = DevServerManager.getAppUrl(false);
-    if (process.env.NODE_ENV === "development") {
-      const isReady = await DevServerManager.waitForDevServer();
-      if (!isReady) {
-        // Dev server not ready, continue anyway
+    try {
+      if (process.env.NODE_ENV === "development") {
+        const isReady = await DevServerManager.waitForDevServer();
+        if (!isReady) {
+          console.warn(
+            "[WindowManager] Dev server not ready, loading anyway...",
+          );
+        }
       }
+      await this.mainWindow.loadURL(appUrl);
+    } catch (error) {
+      console.error("[WindowManager] Failed to load main window:", error);
+      throw error;
     }
-    this.mainWindow.loadURL(appUrl);
   }
 
   async initializeHotkey() {
     const callback = () => {
-      if (!this.mainWindow.isVisible()) {
-        this.mainWindow.show();
-      }
+      this.showDictationPanel(); // Use showInactive() to avoid stealing focus
       this.mainWindow.webContents.send("toggle-dictation");
     };
 
@@ -118,9 +120,7 @@ class WindowManager {
 
   async updateHotkey(hotkey) {
     const callback = () => {
-      if (!this.mainWindow.isVisible()) {
-        this.mainWindow.show();
-      }
+      this.showDictationPanel(); // Use showInactive() to avoid stealing focus
       this.mainWindow.webContents.send("toggle-dictation");
     };
 
@@ -191,7 +191,7 @@ class WindowManager {
       const isReady = await DevServerManager.waitForDevServer();
       if (!isReady) {
         console.error(
-          "Dev server not ready for control panel, loading anyway..."
+          "Dev server not ready for control panel, loading anyway...",
         );
       }
     }
@@ -201,7 +201,21 @@ class WindowManager {
   showDictationPanel(options = {}) {
     const { focus = false } = options;
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      if (!this.mainWindow.isVisible()) {
+      const isVisible = this.mainWindow.isVisible();
+      const isMinimized = this.mainWindow.isMinimized();
+
+      console.log("[WindowManager] showDictationPanel:", {
+        isVisible,
+        isMinimized,
+        focus,
+      });
+
+      // On Linux, minimized windows may still report isVisible=true
+      // so we need to check for minimized state as well
+      if (!isVisible || isMinimized) {
+        if (isMinimized) {
+          this.mainWindow.restore();
+        }
         if (typeof this.mainWindow.showInactive === "function") {
           this.mainWindow.showInactive();
         } else {
@@ -228,11 +242,10 @@ class WindowManager {
 
   hideDictationPanel() {
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      if (process.platform === "darwin") {
-        this.mainWindow.hide();
-      } else {
-        this.mainWindow.minimize();
-      }
+      console.log("[WindowManager] hideDictationPanel called");
+      // Use hide() on all platforms for consistent behavior
+      // This avoids minimize/restore issues on Linux window managers
+      this.mainWindow.hide();
     }
   }
 
@@ -255,13 +268,7 @@ class WindowManager {
 
     this.mainWindow.once("ready-to-show", () => {
       this.enforceMainWindowOnTop();
-      if (!this.mainWindow.isVisible()) {
-        if (typeof this.mainWindow.showInactive === "function") {
-          this.mainWindow.showInactive();
-        } else {
-          this.mainWindow.show();
-        }
-      }
+      // Don't auto-show - window will be shown when recording starts via hotkey
     });
 
     this.mainWindow.on("show", () => {

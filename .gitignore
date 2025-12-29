@@ -265,6 +265,9 @@ $RECYCLE.BIN/
 *.swo
 *~
 
+# Plans (local development notes)
+plans/
+
 # OS generated files
 .DS_Store
 .DS_Store?

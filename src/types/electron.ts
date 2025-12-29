@@ -122,19 +122,19 @@ declare global {
 
       // Database operations
       saveTranscription: (
-        text: string
+        text: string,
       ) => Promise<{ id: number; success: boolean }>;
       getTranscriptions: (limit?: number) => Promise<TranscriptionItem[]>;
       clearTranscriptions: () => Promise<{ cleared: number; success: boolean }>;
       deleteTranscription: (id: number) => Promise<{ success: boolean }>;
       onTranscriptionAdded?: (
-        callback: (item: TranscriptionItem) => void
+        callback: (item: TranscriptionItem) => void,
       ) => (() => void) | void;
       onTranscriptionDeleted?: (
-        callback: (payload: { id: number }) => void
+        callback: (payload: { id: number }) => void,
       ) => (() => void) | void;
       onTranscriptionsCleared?: (
-        callback: (payload: { cleared: number }) => void
+        callback: (payload: { cleared: number }) => void,
       ) => (() => void) | void;
 
       // API key management
@@ -148,7 +148,10 @@ declare global {
       readClipboard: () => Promise<string>;
       writeClipboard: (text: string) => Promise<{ success: boolean }>;
       pasteFromClipboard: () => Promise<{ success: boolean; error?: string }>;
-      pasteFromClipboardWithFallback: () => Promise<{ success: boolean; error?: string }>;
+      pasteFromClipboardWithFallback: () => Promise<{
+        success: boolean;
+        error?: string;
+      }>;
 
       // Settings
       getSettings: () => Promise<any>;
@@ -162,34 +165,34 @@ declare global {
         error?: string;
       }>;
       onNoAudioDetected: (
-        callback: (event: any, data?: any) => void
+        callback: (event: any, data?: any) => void,
       ) => (() => void) | void;
 
       // Python operations
       checkPythonInstallation: () => Promise<PythonInstallation>;
       installPython: () => Promise<PythonInstallResult>;
       onPythonInstallProgress: (
-        callback: (event: any, data: PythonInstallProgressData) => void
+        callback: (event: any, data: PythonInstallProgressData) => void,
       ) => (() => void) | void;
 
       // Whisper operations
       transcribeLocalWhisper: (
         audioBlob: Blob | ArrayBuffer,
-        options?: any
+        options?: any,
       ) => Promise<any>;
       checkWhisperInstallation: () => Promise<WhisperCheckResult>;
       installWhisper: () => Promise<WhisperInstallResult>;
       onWhisperInstallProgress: (
-        callback: (event: any, data: WhisperInstallProgressData) => void
+        callback: (event: any, data: WhisperInstallProgressData) => void,
       ) => (() => void) | void;
       downloadWhisperModel: (modelName: string) => Promise<WhisperModelResult>;
       onWhisperDownloadProgress: (
-        callback: (event: any, data: WhisperDownloadProgressData) => void
+        callback: (event: any, data: WhisperDownloadProgressData) => void,
       ) => (() => void) | void;
       checkModelStatus: (modelName: string) => Promise<WhisperModelResult>;
       listWhisperModels: () => Promise<WhisperModelsListResult>;
       deleteWhisperModel: (
-        modelName: string
+        modelName: string,
       ) => Promise<WhisperModelDeleteResult>;
       cancelWhisperDownload: () => Promise<{
         success: boolean;
@@ -202,19 +205,33 @@ declare global {
       modelCheck: (modelId: string) => Promise<boolean>;
       modelDownload: (modelId: string) => Promise<void>;
       modelDelete: (modelId: string) => Promise<void>;
-      modelDeleteAll: () => Promise<{ success: boolean; error?: string; code?: string }>;
+      modelDeleteAll: () => Promise<{
+        success: boolean;
+        error?: string;
+        code?: string;
+      }>;
       modelCheckRuntime: () => Promise<boolean>;
       onModelDownloadProgress: (
-        callback: (event: any, data: any) => void
+        callback: (event: any, data: any) => void,
       ) => (() => void) | void;
-      
+
       // Local reasoning
-      processLocalReasoning: (text: string, modelId: string, agentName: string | null, config: any) => Promise<{ success: boolean; text?: string; error?: string }>;
+      processLocalReasoning: (
+        text: string,
+        modelId: string,
+        agentName: string | null,
+        config: any,
+      ) => Promise<{ success: boolean; text?: string; error?: string }>;
       checkLocalReasoningAvailable: () => Promise<boolean>;
-      
+
       // Anthropic reasoning
-      processAnthropicReasoning: (text: string, modelId: string, agentName: string | null, config: any) => Promise<{ success: boolean; text?: string; error?: string }>;
-      
+      processAnthropicReasoning: (
+        text: string,
+        modelId: string,
+        agentName: string | null,
+        config: any,
+      ) => Promise<{ success: boolean; text?: string; error?: string }>;
+
       // llama.cpp management
       llamaCppCheck: () => Promise<{ isInstalled: boolean; version?: string }>;
       llamaCppInstall: () => Promise<{ success: boolean; error?: string }>;
@@ -226,6 +243,8 @@ declare global {
       windowClose: () => Promise<void>;
       windowIsMaximized: () => Promise<boolean>;
       getPlatform: () => string;
+      isWayland: () => boolean;
+      getSessionType: () => string;
       startWindowDrag: () => Promise<void>;
       stopWindowDrag: () => Promise<void>;
       setMainWindowInteractivity: (interactive: boolean) => Promise<void>;
@@ -245,19 +264,19 @@ declare global {
 
       // Update event listeners
       onUpdateAvailable: (
-        callback: (event: any, info: any) => void
+        callback: (event: any, info: any) => void,
       ) => (() => void) | void;
       onUpdateNotAvailable: (
-        callback: (event: any, info: any) => void
+        callback: (event: any, info: any) => void,
       ) => (() => void) | void;
       onUpdateDownloaded: (
-        callback: (event: any, info: any) => void
+        callback: (event: any, info: any) => void,
       ) => (() => void) | void;
       onUpdateDownloadProgress: (
-        callback: (event: any, progressObj: any) => void
+        callback: (event: any, progressObj: any) => void,
       ) => (() => void) | void;
       onUpdateError: (
-        callback: (event: any, error: any) => void
+        callback: (event: any, error: any) => void,
       ) => (() => void) | void;
 
       // Settings management (used by OnboardingFlow but not in preload.js)
@@ -265,26 +284,28 @@ declare global {
 
       // External URL operations
       openExternal: (
-        url: string
+        url: string,
       ) => Promise<{ success: boolean; error?: string } | void>;
 
       // Event listener cleanup
       removeAllListeners: (channel: string) => void;
 
       // Hotkey management
-      updateHotkey: (key: string) => Promise<{ success: boolean; message: string }>;
-      
+      updateHotkey: (
+        key: string,
+      ) => Promise<{ success: boolean; message: string }>;
+
       // Gemini API key management
       getGeminiKey: () => Promise<string | null>;
       saveGeminiKey: (key: string) => Promise<void>;
-      
+
       // Debug logging
       logReasoning?: (stage: string, details: any) => Promise<void>;
-      
+
       // FFmpeg availability
       checkFFmpegAvailability: () => Promise<boolean>;
     };
-    
+
     api?: {
       sendDebugLog: (message: string) => void;
     };
