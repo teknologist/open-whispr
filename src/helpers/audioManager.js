@@ -1,7 +1,14 @@
 import ReasoningService from "../services/ReasoningService";
-import { API_ENDPOINTS, buildApiUrl, normalizeBaseUrl } from "../config/constants";
+import {
+  API_ENDPOINTS,
+  buildApiUrl,
+  normalizeBaseUrl,
+} from "../config/constants";
 
-const isDebugMode = typeof process !== 'undefined' && (process.env.OPENWHISPR_DEBUG === 'true' || process.env.NODE_ENV === 'development');
+const isDebugMode =
+  typeof process !== "undefined" &&
+  (process.env.OPENWHISPR_DEBUG === "true" ||
+    process.env.NODE_ENV === "development");
 const SHORT_CLIP_DURATION_SECONDS = 2.5;
 const REASONING_CACHE_TTL = 30000; // 30 seconds
 
@@ -16,9 +23,14 @@ const debugLogger = {
         // Silent fail
       }
     }
-  }
+  },
 };
 
+// Default silence detection settings
+const DEFAULT_SILENCE_THRESHOLD_MS = 1500; // 1.5 seconds
+const SILENCE_CHECK_INTERVAL_MS = 100; // Check every 100ms
+const SILENCE_AMPLITUDE_THRESHOLD = 0.02; // RMS level below this is considered silence
+const FREQUENCY_DATA_MAX = 255; // Uint8Array max value for frequency data
 
 class AudioManager {
   constructor() {
@@ -34,6 +46,138 @@ class AudioManager {
     this.recordingStartTime = null;
     this.reasoningAvailabilityCache = { value: false, expiresAt: 0 };
     this.cachedReasoningPreference = null;
+
+    // Silence detection
+    this.audioContext = null;
+    this.analyser = null;
+    this.silenceDetectionSource = null; // MediaStreamSource for proper cleanup
+    this.silenceCheckInterval = null;
+    this.silenceStartTime = null;
+    this.hasDetectedSpeech = false; // Only stop after speech has been detected
+    this.cachedSilenceSettings = null; // Cache to avoid repeated localStorage reads
+  }
+
+  // Get silence settings from localStorage
+  getSilenceSettings() {
+    const enabled = localStorage.getItem("silenceAutoStop") === "true";
+    const threshold =
+      parseInt(localStorage.getItem("silenceThreshold"), 10) ||
+      DEFAULT_SILENCE_THRESHOLD_MS;
+    return { enabled, threshold };
+  }
+
+  // Check if current audio level is silence using RMS for accuracy
+  checkAudioLevel() {
+    if (!this.analyser || !this.isRecording) return;
+
+    // Use cached settings to avoid repeated localStorage reads
+    const { enabled, threshold } = this.cachedSilenceSettings || {};
+    if (!enabled) return;
+
+    // Use time domain data for more accurate RMS calculation
+    const timeDomainArray = new Uint8Array(this.analyser.fftSize);
+    this.analyser.getByteTimeDomainData(timeDomainArray);
+
+    // Calculate RMS (Root Mean Square) for accurate volume detection
+    const rms = Math.sqrt(
+      timeDomainArray.reduce(
+        (sum, val) => sum + Math.pow((val - 128) / 128, 2),
+        0,
+      ) / timeDomainArray.length,
+    );
+
+    if (rms < SILENCE_AMPLITUDE_THRESHOLD) {
+      // Currently silence
+      if (!this.silenceStartTime) {
+        this.silenceStartTime = Date.now();
+      } else if (this.hasDetectedSpeech) {
+        // Only auto-stop after we've detected some speech
+        const silenceDuration = Date.now() - this.silenceStartTime;
+        if (silenceDuration >= threshold) {
+          // Clear interval first to prevent re-triggering (race condition fix)
+          if (this.silenceCheckInterval) {
+            clearInterval(this.silenceCheckInterval);
+            this.silenceCheckInterval = null;
+          }
+          // Auto-stop recording due to silence (only if still recording)
+          if (this.isRecording && this.mediaRecorder) {
+            this.stopRecording();
+          }
+        }
+      }
+    } else {
+      // Not silence - reset timer and mark that we've detected speech
+      this.silenceStartTime = null;
+      this.hasDetectedSpeech = true;
+    }
+  }
+
+  // Start monitoring audio levels for silence detection
+  startSilenceDetection(stream) {
+    // Cache settings to avoid repeated localStorage reads during monitoring
+    this.cachedSilenceSettings = this.getSilenceSettings();
+    if (!this.cachedSilenceSettings.enabled) return;
+
+    // Clean up any existing detection first (prevents AudioContext accumulation)
+    this.stopSilenceDetection();
+
+    try {
+      this.audioContext = new (
+        window.AudioContext || window.webkitAudioContext
+      )();
+      this.analyser = this.audioContext.createAnalyser();
+      this.analyser.fftSize = 256;
+
+      // Store source reference for proper cleanup
+      this.silenceDetectionSource =
+        this.audioContext.createMediaStreamSource(stream);
+      this.silenceDetectionSource.connect(this.analyser);
+
+      // Reset silence tracking
+      this.silenceStartTime = null;
+      this.hasDetectedSpeech = false;
+
+      // Start checking audio levels
+      this.silenceCheckInterval = setInterval(() => {
+        this.checkAudioLevel();
+      }, SILENCE_CHECK_INTERVAL_MS);
+    } catch (error) {
+      console.warn("[AudioManager] Failed to start silence detection:", error);
+      // Notify user that the feature isn't working
+      this.onError?.({
+        title: "Silence Detection Unavailable",
+        description:
+          "Auto-stop on silence couldn't be enabled. Recording will work normally.",
+      });
+    }
+  }
+
+  // Stop silence detection and cleanup
+  stopSilenceDetection() {
+    if (this.silenceCheckInterval) {
+      clearInterval(this.silenceCheckInterval);
+      this.silenceCheckInterval = null;
+    }
+
+    // Disconnect source before closing context
+    if (this.silenceDetectionSource) {
+      try {
+        this.silenceDetectionSource.disconnect();
+      } catch {
+        // Ignore disconnect errors (may already be disconnected)
+      }
+      this.silenceDetectionSource = null;
+    }
+
+    if (this.audioContext && this.audioContext.state !== "closed") {
+      this.audioContext.close().catch(() => {});
+    }
+
+    this.audioContext = null;
+    this.analyser = null;
+    this.silenceStartTime = null;
+    this.hasDetectedSpeech = false;
+    this.cachedSilenceSettings = null;
   }
 
   setCallbacks({ onStateChange, onError, onTranscriptionComplete }) {
@@ -50,7 +194,6 @@ class AudioManager {
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-
       this.mediaRecorder = new MediaRecorder(stream);
       this.audioChunks = [];
       this.recordingStartTime = Date.now();
@@ -60,15 +203,18 @@ class AudioManager {
       };
 
       this.mediaRecorder.onstop = async () => {
+        // Stop silence detection immediately
+        this.stopSilenceDetection();
+
         this.isRecording = false;
         this.isProcessing = true;
         this.onStateChange?.({ isRecording: false, isProcessing: true });
 
         const audioBlob = new Blob(this.audioChunks, { type: "audio/wav" });
-        
+
         if (audioBlob.size === 0) {
         }
-        
+
         const durationSeconds = this.recordingStartTime
           ? (Date.now() - this.recordingStartTime) / 1000
           : null;
@@ -83,24 +229,38 @@ class AudioManager {
       this.isRecording = true;
       this.onStateChange?.({ isRecording: true, isProcessing: false });
 
+      // Start silence detection after recording begins
+      this.startSilenceDetection(stream);
+
       return true;
     } catch (error) {
-      
       // Provide more specific error messages
       let errorTitle = "Recording Error";
       let errorDescription = `Failed to access microphone: ${error.message}`;
-      
-      if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
+
+      if (
+        error.name === "NotAllowedError" ||
+        error.name === "PermissionDeniedError"
+      ) {
         errorTitle = "Microphone Access Denied";
-        errorDescription = "Please grant microphone permission in your system settings and try again.";
-      } else if (error.name === "NotFoundError" || error.name === "DevicesNotFoundError") {
+        errorDescription =
+          "Please grant microphone permission in your system settings and try again.";
+      } else if (
+        error.name === "NotFoundError" ||
+        error.name === "DevicesNotFoundError"
+      ) {
         errorTitle = "No Microphone Found";
-        errorDescription = "No microphone was detected. Please connect a microphone and try again.";
-      } else if (error.name === "NotReadableError" || error.name === "TrackStartError") {
+        errorDescription =
+          "No microphone was detected. Please connect a microphone and try again.";
+      } else if (
+        error.name === "NotReadableError" ||
+        error.name === "TrackStartError"
+      ) {
         errorTitle = "Microphone In Use";
-        errorDescription = "The microphone is being used by another application. Please close other apps and try again.";
+        errorDescription =
+          "The microphone is being used by another application. Please close other apps and try again.";
       }
-      
+
       this.onError?.({
         title: errorTitle,
         description: errorDescription,
@@ -110,6 +270,10 @@ class AudioManager {
   }
 
   stopRecording() {
+    // Always clean up silence detection regardless of recording state
+    // This prevents memory leaks if called when not recording
+    this.stopSilenceDetection();
+
     if (this.mediaRecorder && this.isRecording) {
       this.mediaRecorder.stop();
       // State change will be handled in onstop callback
@@ -119,18 +283,43 @@ class AudioManager {
   }
 
   async processAudio(audioBlob, metadata = {}) {
+    console.log("[AudioManager] processAudio START");
     try {
-      const useLocalWhisper = localStorage.getItem("useLocalWhisper") === "true";
+      const useLocalWhisper =
+        localStorage.getItem("useLocalWhisper") === "true";
       const whisperModel = localStorage.getItem("whisperModel") || "base";
+      console.log(
+        "[AudioManager] Using local whisper:",
+        useLocalWhisper,
+        "model:",
+        whisperModel,
+      );
 
       let result;
       if (useLocalWhisper) {
-        result = await this.processWithLocalWhisper(audioBlob, whisperModel, metadata);
+        console.log("[AudioManager] Calling processWithLocalWhisper...");
+        result = await this.processWithLocalWhisper(
+          audioBlob,
+          whisperModel,
+          metadata,
+        );
+        console.log("[AudioManager] processWithLocalWhisper returned:", {
+          success: result?.success,
+          textLength: result?.text?.length,
+        });
       } else {
+        console.log("[AudioManager] Calling processWithOpenAIAPI...");
         result = await this.processWithOpenAIAPI(audioBlob, metadata);
+        console.log("[AudioManager] processWithOpenAIAPI returned:", {
+          success: result?.success,
+          textLength: result?.text?.length,
+        });
       }
+      console.log("[AudioManager] Calling onTranscriptionComplete callback...");
       this.onTranscriptionComplete?.(result);
+      console.log("[AudioManager] onTranscriptionComplete callback done");
     } catch (error) {
+      console.log("[AudioManager] processAudio ERROR:", error.message);
       if (error.message !== "No audio detected") {
         this.onError?.({
           title: "Transcription Error",
@@ -138,6 +327,7 @@ class AudioManager {
         });
       }
     } finally {
+      console.log("[AudioManager] processAudio FINALLY - resetting state");
       this.isProcessing = false;
       this.onStateChange?.({ isRecording: false, isProcessing: false });
     }
@@ -154,7 +344,7 @@ class AudioManager {
 
       const result = await window.electronAPI.transcribeLocalWhisper(
         arrayBuffer,
-        options
+        options,
       );
 
       if (result.success && result.text) {
@@ -164,10 +354,14 @@ class AudioManager {
         } else {
           throw new Error("No text transcribed");
         }
-      } else if (result.success === false && result.message === "No audio detected") {
+      } else if (
+        result.success === false &&
+        result.message === "No audio detected"
+      ) {
         this.onError?.({
           title: "No Audio Detected",
-          description: "The recording contained no detectable audio. Please check your microphone settings.",
+          description:
+            "The recording contained no detectable audio. Please check your microphone settings.",
         });
         throw new Error("No audio detected");
       } else {
@@ -178,15 +372,21 @@ class AudioManager {
         throw error;
       }
 
-      const allowOpenAIFallback = localStorage.getItem("allowOpenAIFallback") === "true";
+      const allowOpenAIFallback =
+        localStorage.getItem("allowOpenAIFallback") === "true";
       const isLocalMode = localStorage.getItem("useLocalWhisper") === "true";
 
       if (allowOpenAIFallback && isLocalMode) {
         try {
-          const fallbackResult = await this.processWithOpenAIAPI(audioBlob, metadata);
+          const fallbackResult = await this.processWithOpenAIAPI(
+            audioBlob,
+            metadata,
+          );
           return { ...fallbackResult, source: "openai-fallback" };
         } catch (fallbackError) {
-          throw new Error(`Local Whisper failed: ${error.message}. OpenAI fallback also failed: ${fallbackError.message}`);
+          throw new Error(
+            `Local Whisper failed: ${error.message}. OpenAI fallback also failed: ${fallbackError.message}`,
+          );
         }
       } else {
         throw new Error(`Local Whisper failed: ${error.message}`);
@@ -214,7 +414,7 @@ class AudioManager {
       apiKey === "your_openai_api_key_here"
     ) {
       throw new Error(
-        "OpenAI API key not found. Please set your API key in the .env file or Control Panel."
+        "OpenAI API key not found. Please set your API key in the .env file or Control Panel.",
       );
     }
 
@@ -224,8 +424,9 @@ class AudioManager {
 
   async optimizeAudio(audioBlob) {
     return new Promise((resolve) => {
-      const audioContext = new (window.AudioContext ||
-        window.webkitAudioContext)();
+      const audioContext = new (
+        window.AudioContext || window.webkitAudioContext
+      )();
       const reader = new FileReader();
 
       reader.onload = async () => {
@@ -240,7 +441,7 @@ class AudioManager {
           const offlineContext = new OfflineAudioContext(
             channels,
             length,
-            sampleRate
+            sampleRate,
           );
 
           const source = offlineContext.createBufferSource();
@@ -295,7 +496,7 @@ class AudioManager {
       view.setInt16(
         offset,
         sample < 0 ? sample * 0x8000 : sample * 0x7fff,
-        true
+        true,
       );
       offset += 2;
     }
@@ -304,43 +505,61 @@ class AudioManager {
   }
 
   async processWithReasoningModel(text, model, agentName) {
+    console.log("[AudioManager] processWithReasoningModel START", {
+      model,
+      agentName,
+      textLength: text.length,
+    });
     debugLogger.logReasoning("CALLING_REASONING_SERVICE", {
       model,
       agentName,
-      textLength: text.length
+      textLength: text.length,
     });
-    
+
     const startTime = Date.now();
-    
+
     try {
+      console.log("[AudioManager] Calling ReasoningService.processText...");
       const result = await ReasoningService.processText(text, model, agentName);
-      
+      console.log("[AudioManager] ReasoningService.processText returned:", {
+        resultLength: result?.length,
+      });
+
       const processingTime = Date.now() - startTime;
-      
+
       debugLogger.logReasoning("REASONING_SERVICE_COMPLETE", {
         model,
         processingTimeMs: processingTime,
         resultLength: result.length,
-        success: true
+        success: true,
       });
-      
+
+      console.log(
+        "[AudioManager] processWithReasoningModel SUCCESS, returning result",
+      );
       return result;
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      
+      console.log(
+        "[AudioManager] processWithReasoningModel ERROR:",
+        error.message,
+      );
+
       debugLogger.logReasoning("REASONING_SERVICE_ERROR", {
         model,
         processingTimeMs: processingTime,
         error: error.message,
-        stack: error.stack
+        stack: error.stack,
       });
-      
+
       throw error;
     }
   }
 
   async isReasoningAvailable() {
+    console.log("[AudioManager] isReasoningAvailable called");
     if (typeof window === "undefined" || !window.localStorage) {
+      console.log("[AudioManager] No window/localStorage - returning false");
       return false;
     }
 
@@ -351,7 +570,17 @@ class AudioManager {
       now < this.reasoningAvailabilityCache.expiresAt &&
       this.cachedReasoningPreference === storedValue;
 
+    console.log("[AudioManager] isReasoningAvailable check:", {
+      storedValue,
+      cacheValid,
+      cachedValue: this.reasoningAvailabilityCache?.value,
+    });
+
     if (cacheValid) {
+      console.log(
+        "[AudioManager] Using cached value:",
+        this.reasoningAvailabilityCache.value,
+      );
       return this.reasoningAvailabilityCache.value;
     }
 
@@ -365,7 +594,15 @@ class AudioManager {
     const useReasoning =
       storedValue === "true" || (!!storedValue && storedValue !== "false");
 
+    console.log(
+      "[AudioManager] useReasoning (from localStorage):",
+      useReasoning,
+    );
+
     if (!useReasoning) {
+      console.log(
+        "[AudioManager] Reasoning disabled in settings - returning false",
+      );
       this.reasoningAvailabilityCache = {
         value: false,
         expiresAt: now + REASONING_CACHE_TTL,
@@ -375,7 +612,12 @@ class AudioManager {
     }
 
     try {
+      console.log("[AudioManager] Checking ReasoningService.isAvailable()...");
       const isAvailable = await ReasoningService.isAvailable();
+      console.log(
+        "[AudioManager] ReasoningService.isAvailable() =",
+        isAvailable,
+      );
 
       debugLogger.logReasoning("REASONING_AVAILABILITY", {
         isAvailable,
@@ -391,6 +633,10 @@ class AudioManager {
 
       return isAvailable;
     } catch (error) {
+      console.log(
+        "[AudioManager] ReasoningService.isAvailable() ERROR:",
+        error.message,
+      );
       debugLogger.logReasoning("REASONING_AVAILABILITY_ERROR", {
         error: error.message,
         stack: error.stack,
@@ -406,64 +652,87 @@ class AudioManager {
   }
 
   async processTranscription(text, source) {
+    console.log("[AudioManager] processTranscription START", {
+      source,
+      textLength: text?.length,
+    });
     const normalizedText = typeof text === "string" ? text.trim() : "";
 
     debugLogger.logReasoning("TRANSCRIPTION_RECEIVED", {
       source,
       textLength: normalizedText.length,
-      textPreview: normalizedText.substring(0, 100) + (normalizedText.length > 100 ? "..." : ""),
-      timestamp: new Date().toISOString()
+      textPreview:
+        normalizedText.substring(0, 100) +
+        (normalizedText.length > 100 ? "..." : ""),
+      timestamp: new Date().toISOString(),
     });
 
-    const reasoningModel = (typeof window !== 'undefined' && window.localStorage)
-      ? (localStorage.getItem("reasoningModel") || "gpt-4o-mini")
-      : "gpt-4o-mini";
-    const reasoningProvider = (typeof window !== 'undefined' && window.localStorage)
-      ? (localStorage.getItem("reasoningProvider") || "auto")
-      : "auto";
-    const agentName = (typeof window !== 'undefined' && window.localStorage)
-      ? (localStorage.getItem("agentName") || null)
-      : null;
+    const reasoningModel =
+      typeof window !== "undefined" && window.localStorage
+        ? localStorage.getItem("reasoningModel") || "gpt-4o-mini"
+        : "gpt-4o-mini";
+    const reasoningProvider =
+      typeof window !== "undefined" && window.localStorage
+        ? localStorage.getItem("reasoningProvider") || "auto"
+        : "auto";
+    const agentName =
+      typeof window !== "undefined" && window.localStorage
+        ? localStorage.getItem("agentName") || null
+        : null;
+
+    console.log("[AudioManager] Checking isReasoningAvailable...");
     const useReasoning = await this.isReasoningAvailable();
+    console.log("[AudioManager] useReasoning =", useReasoning, {
+      reasoningModel,
+      reasoningProvider,
+    });
 
     debugLogger.logReasoning("REASONING_CHECK", {
       useReasoning,
       reasoningModel,
       reasoningProvider,
-      agentName
+      agentName,
     });
 
     if (useReasoning) {
+      console.log(
+        "[AudioManager] AI Enhancement ENABLED - calling processWithReasoningModel",
+      );
       try {
         const preparedText = normalizedText;
 
         debugLogger.logReasoning("SENDING_TO_REASONING", {
           preparedTextLength: preparedText.length,
           model: reasoningModel,
-          provider: reasoningProvider
+          provider: reasoningProvider,
         });
 
-        const result = await this.processWithReasoningModel(preparedText, reasoningModel, agentName);
-        
+        const result = await this.processWithReasoningModel(
+          preparedText,
+          reasoningModel,
+          agentName,
+        );
+
         debugLogger.logReasoning("REASONING_SUCCESS", {
           resultLength: result.length,
-          resultPreview: result.substring(0, 100) + (result.length > 100 ? "..." : ""),
-          processingTime: new Date().toISOString()
+          resultPreview:
+            result.substring(0, 100) + (result.length > 100 ? "..." : ""),
+          processingTime: new Date().toISOString(),
         });
-        
+
         return result;
       } catch (error) {
         debugLogger.logReasoning("REASONING_FAILED", {
           error: error.message,
           stack: error.stack,
-          fallbackToCleanup: true
+          fallbackToCleanup: true,
         });
         console.error(`Reasoning failed (${source}):`, error.message);
       }
     }
 
     debugLogger.logReasoning("USING_STANDARD_CLEANUP", {
-      reason: useReasoning ? "Reasoning failed" : "Reasoning not enabled"
+      reason: useReasoning ? "Reasoning failed" : "Reasoning not enabled",
     });
 
     return normalizedText;
@@ -473,10 +742,10 @@ class AudioManager {
     const language = localStorage.getItem("preferredLanguage");
     const allowLocalFallback =
       localStorage.getItem("allowLocalFallback") === "true";
-    const fallbackModel = localStorage.getItem("fallbackWhisperModel") || "base";
+    const fallbackModel =
+      localStorage.getItem("fallbackWhisperModel") || "base";
 
     try {
-
       const durationSeconds = metadata.durationSeconds ?? null;
       const shouldSkipOptimizationForDuration =
         typeof durationSeconds === "number" &&
@@ -488,7 +757,9 @@ class AudioManager {
 
       const [apiKey, optimizedAudio] = await Promise.all([
         this.getAPIKey(),
-        shouldOptimize ? this.optimizeAudio(audioBlob) : Promise.resolve(audioBlob),
+        shouldOptimize
+          ? this.optimizeAudio(audioBlob)
+          : Promise.resolve(audioBlob),
       ]);
 
       const formData = new FormData();
@@ -499,16 +770,13 @@ class AudioManager {
         formData.append("language", language);
       }
 
-      const response = await fetch(
-        this.getTranscriptionEndpoint(),
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: formData,
-        }
-      );
+      const response = await fetch(this.getTranscriptionEndpoint(), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: formData,
+      });
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -519,7 +787,9 @@ class AudioManager {
 
       if (result.text) {
         const text = await this.processTranscription(result.text, "openai");
-        const source = await this.isReasoningAvailable() ? "openai-reasoned" : "openai";
+        const source = (await this.isReasoningAvailable())
+          ? "openai-reasoned"
+          : "openai";
         return { success: true, text, source };
       } else {
         throw new Error("No text transcribed");
@@ -537,11 +807,14 @@ class AudioManager {
 
           const result = await window.electronAPI.transcribeLocalWhisper(
             arrayBuffer,
-            options
+            options,
           );
 
           if (result.success && result.text) {
-            const text = await this.processTranscription(result.text, "local-fallback");
+            const text = await this.processTranscription(
+              result.text,
+              "local-fallback",
+            );
             if (text) {
               return { success: true, text, source: "local-fallback" };
             }
@@ -549,7 +822,7 @@ class AudioManager {
           throw error;
         } catch (fallbackError) {
           throw new Error(
-            `OpenAI API failed: ${error.message}. Local fallback also failed: ${fallbackError.message}`
+            `OpenAI API failed: ${error.message}. Local fallback also failed: ${fallbackError.message}`,
           );
         }
       }
@@ -564,9 +837,10 @@ class AudioManager {
     }
 
     try {
-      const stored = typeof localStorage !== "undefined"
-        ? localStorage.getItem("cloudTranscriptionBaseUrl") || ""
-        : "";
+      const stored =
+        typeof localStorage !== "undefined"
+          ? localStorage.getItem("cloudTranscriptionBaseUrl") || ""
+          : "";
       const trimmed = stored.trim();
       const base = trimmed ? trimmed : API_ENDPOINTS.TRANSCRIPTION_BASE;
       const normalizedBase = normalizeBaseUrl(base);
@@ -576,9 +850,13 @@ class AudioManager {
         return API_ENDPOINTS.TRANSCRIPTION;
       }
 
-      const isLocalhost = normalizedBase.includes('://localhost') || normalizedBase.includes('://127.0.0.1');
-      if (!normalizedBase.startsWith('https://') && !isLocalhost) {
-        console.warn('Non-HTTPS endpoint rejected for security. Using default.');
+      const isLocalhost =
+        normalizedBase.includes("://localhost") ||
+        normalizedBase.includes("://127.0.0.1");
+      if (!normalizedBase.startsWith("https://") && !isLocalhost) {
+        console.warn(
+          "Non-HTTPS endpoint rejected for security. Using default.",
+        );
         this.cachedTranscriptionEndpoint = API_ENDPOINTS.TRANSCRIPTION;
         return API_ENDPOINTS.TRANSCRIPTION;
       }
@@ -587,13 +865,13 @@ class AudioManager {
       if (/\/audio\/(transcriptions|translations)$/i.test(normalizedBase)) {
         endpoint = normalizedBase;
       } else {
-        endpoint = buildApiUrl(normalizedBase, '/audio/transcriptions');
+        endpoint = buildApiUrl(normalizedBase, "/audio/transcriptions");
       }
 
       this.cachedTranscriptionEndpoint = endpoint;
       return endpoint;
     } catch (error) {
-      console.warn('Failed to resolve transcription endpoint:', error);
+      console.warn("Failed to resolve transcription endpoint:", error);
       this.cachedTranscriptionEndpoint = API_ENDPOINTS.TRANSCRIPTION;
       return API_ENDPOINTS.TRANSCRIPTION;
     }
@@ -629,6 +907,9 @@ class AudioManager {
   }
 
   cleanup() {
+    // Stop silence detection first
+    this.stopSilenceDetection();
+
     if (this.mediaRecorder && this.isRecording) {
       this.stopRecording();
     }

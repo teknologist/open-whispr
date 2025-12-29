@@ -1,7 +1,15 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import { RefreshCw, Download, Keyboard, Mic, Shield } from "lucide-react";
+import { Toggle } from "./ui/toggle";
+import {
+  RefreshCw,
+  Download,
+  Keyboard,
+  Mic,
+  Shield,
+  Volume2,
+} from "lucide-react";
 import WhisperModelPicker from "./WhisperModelPicker";
 import ProcessingModeSelector from "./ui/ProcessingModeSelector";
 import ApiKeyInput from "./ui/ApiKeyInput";
@@ -62,6 +70,8 @@ export default function SettingsPage({
     anthropicApiKey,
     geminiApiKey,
     dictationKey,
+    silenceAutoStop,
+    silenceThreshold,
     setUseLocalWhisper,
     setWhisperModel,
     setAllowOpenAIFallback,
@@ -77,6 +87,8 @@ export default function SettingsPage({
     setAnthropicApiKey,
     setGeminiApiKey,
     setDictationKey,
+    setSilenceAutoStop,
+    setSilenceThreshold,
     updateTranscriptionSettings,
     updateReasoningSettings,
     updateApiKeys,
@@ -276,6 +288,7 @@ export default function SettingsPage({
       }
       installTimeoutRef.current = setTimeout(() => {
         setInstallInitiated(false);
+        // Use showAlertDialog directly - it's stable from useDialogs hook
         showAlertDialog({
           title: "Still Running",
           description:
@@ -293,7 +306,8 @@ export default function SettingsPage({
         installTimeoutRef.current = null;
       }
     };
-  }, [installInitiated, showAlertDialog]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [installInitiated]); // showAlertDialog is stable, no need to include
 
   const saveReasoningSettings = useCallback(async () => {
     const normalizedReasoningBase = (cloudReasoningBaseUrl || "").trim();
@@ -852,9 +866,56 @@ export default function SettingsPage({
                 </h3>
                 <p className="text-sm text-gray-600 mb-6">
                   Test and manage app permissions for microphone and
-                  accessibility.
+                  {isWayland ? " text input." : " accessibility."}
                 </p>
               </div>
+
+              {isWayland && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+                  <div className="flex items-start gap-3">
+                    <span className="text-blue-600 text-xl">🔧</span>
+                    <div>
+                      <h4 className="font-medium text-blue-800 mb-2">
+                        ydotool Setup Required for Text Input
+                      </h4>
+                      <p className="text-sm text-blue-700 mb-3">
+                        On Wayland, OpenWhispr uses{" "}
+                        <code className="bg-blue-100 px-1 rounded">
+                          ydotool
+                        </code>{" "}
+                        to type text directly into applications. This requires
+                        the ydotool daemon to be running.
+                      </p>
+                      <div className="bg-white rounded p-3 space-y-2">
+                        <p className="text-sm font-medium text-blue-900">
+                          Installation:
+                        </p>
+                        <code className="block bg-gray-100 rounded px-3 py-2 text-xs font-mono">
+                          # Fedora/RHEL
+                          {"\n"}sudo dnf install ydotool
+                          {"\n\n"}# Arch Linux
+                          {"\n"}sudo pacman -S ydotool
+                          {"\n\n"}# Ubuntu/Debian
+                          {"\n"}sudo apt install ydotool
+                        </code>
+                        <p className="text-sm font-medium text-blue-900 mt-3">
+                          Enable the daemon:
+                        </p>
+                        <code className="block bg-gray-100 rounded px-3 py-2 text-xs font-mono">
+                          sudo systemctl enable --now ydotool
+                          {"\n"}# Or add your user to the input group:
+                          {"\n"}sudo usermod -aG input $USER
+                        </code>
+                        <p className="text-xs text-blue-600 mt-2">
+                          After installation, log out and back in for group
+                          changes to take effect.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-3">
                 <Button
                   onClick={permissionsHook.requestMicPermission}
@@ -868,18 +929,25 @@ export default function SettingsPage({
                   onClick={permissionsHook.testAccessibilityPermission}
                   variant="outline"
                   className="w-full"
+                  disabled={permissionsHook.isTestingAccessibility}
                 >
                   <Shield className="mr-2 h-4 w-4" />
-                  Test Accessibility Permission
+                  {permissionsHook.isTestingAccessibility
+                    ? "Testing..."
+                    : isWayland
+                      ? "Test Text Input (ydotool)"
+                      : "Test Accessibility Permission"}
                 </Button>
-                <Button
-                  onClick={resetAccessibilityPermissions}
-                  variant="secondary"
-                  className="w-full"
-                >
-                  <span className="mr-2">⚙️</span>
-                  Fix Permission Issues
-                </Button>
+                {!isWayland && (
+                  <Button
+                    onClick={resetAccessibilityPermissions}
+                    variant="secondary"
+                    className="w-full"
+                  >
+                    <span className="mr-2">⚙️</span>
+                    Fix Permission Issues
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -1109,6 +1177,75 @@ export default function SettingsPage({
                 }}
                 className="w-full"
               />
+            </div>
+
+            {/* Silence Auto-Stop */}
+            <div className="space-y-4 p-4 bg-gray-50 border border-gray-200 rounded-xl">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <Volume2 className="h-5 w-5 text-gray-600" />
+                  <div>
+                    <h4 className="font-medium text-gray-900">
+                      Auto-stop on silence
+                    </h4>
+                    <p className="text-sm text-gray-600">
+                      Automatically stop recording after a period of silence
+                    </p>
+                  </div>
+                </div>
+                <Toggle
+                  checked={silenceAutoStop}
+                  onChange={setSilenceAutoStop}
+                />
+              </div>
+
+              {silenceAutoStop && (
+                <div className="pt-4 border-t border-gray-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <label
+                      htmlFor="silence-threshold"
+                      className="text-sm font-medium text-gray-700"
+                    >
+                      Silence threshold
+                    </label>
+                    <span className="text-sm text-gray-600 font-mono">
+                      {(silenceThreshold / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+                  <input
+                    id="silence-threshold"
+                    type="range"
+                    min={300}
+                    max={5000}
+                    step={100}
+                    value={silenceThreshold}
+                    onChange={(e) =>
+                      setSilenceThreshold(parseInt(e.target.value, 10))
+                    }
+                    aria-label="Silence threshold in milliseconds"
+                    aria-valuemin={300}
+                    aria-valuemax={5000}
+                    aria-valuenow={silenceThreshold}
+                    aria-valuetext={`${(silenceThreshold / 1000).toFixed(1)} seconds`}
+                    className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                  />
+                  <div className="flex justify-between text-xs text-gray-500 mt-1">
+                    <span>0.3s</span>
+                    <span>5s</span>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    Recording will stop automatically after this duration of
+                    silence (only after speech has been detected).
+                    {silenceThreshold < 1000 &&
+                      " Quick cutoff — good for rapid dictation."}
+                    {silenceThreshold >= 1000 &&
+                      silenceThreshold <= 2000 &&
+                      " Balanced — works for most use cases."}
+                    {silenceThreshold > 2000 &&
+                      " Longer patience — good for thinking pauses."}
+                  </p>
+                </div>
+              )}
             </div>
 
             <Button

@@ -30,6 +30,11 @@ export interface ApiKeySettings {
   geminiApiKey: string;
 }
 
+export interface SilenceSettings {
+  silenceAutoStop: boolean;
+  silenceThreshold: number; // 300-5000ms
+}
+
 export function useSettings() {
   const [useLocalWhisper, setUseLocalWhisper] = useLocalStorage(
     "useLocalWhisper",
@@ -37,7 +42,7 @@ export function useSettings() {
     {
       serialize: String,
       deserialize: (value) => value === "true",
-    }
+    },
   );
 
   const [whisperModel, setWhisperModel] = useLocalStorage(
@@ -46,7 +51,7 @@ export function useSettings() {
     {
       serialize: String,
       deserialize: String,
-    }
+    },
   );
 
   const [allowOpenAIFallback, setAllowOpenAIFallback] = useLocalStorage(
@@ -55,7 +60,7 @@ export function useSettings() {
     {
       serialize: String,
       deserialize: (value) => value === "true",
-    }
+    },
   );
 
   const [allowLocalFallback, setAllowLocalFallback] = useLocalStorage(
@@ -64,7 +69,7 @@ export function useSettings() {
     {
       serialize: String,
       deserialize: (value) => value === "true",
-    }
+    },
   );
 
   const [fallbackWhisperModel, setFallbackWhisperModel] = useLocalStorage(
@@ -73,7 +78,7 @@ export function useSettings() {
     {
       serialize: String,
       deserialize: String,
-    }
+    },
   );
 
   const [preferredLanguage, setPreferredLanguage] = useLocalStorage(
@@ -82,17 +87,18 @@ export function useSettings() {
     {
       serialize: String,
       deserialize: String,
-    }
+    },
   );
 
-  const [cloudTranscriptionBaseUrl, setCloudTranscriptionBaseUrl] = useLocalStorage(
-    "cloudTranscriptionBaseUrl",
-    API_ENDPOINTS.TRANSCRIPTION_BASE,
-    {
-      serialize: String,
-      deserialize: String,
-    }
-  );
+  const [cloudTranscriptionBaseUrl, setCloudTranscriptionBaseUrl] =
+    useLocalStorage(
+      "cloudTranscriptionBaseUrl",
+      API_ENDPOINTS.TRANSCRIPTION_BASE,
+      {
+        serialize: String,
+        deserialize: String,
+      },
+    );
 
   const [cloudReasoningBaseUrl, setCloudReasoningBaseUrl] = useLocalStorage(
     "cloudReasoningBaseUrl",
@@ -100,7 +106,7 @@ export function useSettings() {
     {
       serialize: String,
       deserialize: String,
-    }
+    },
   );
 
   // Reasoning settings
@@ -110,7 +116,7 @@ export function useSettings() {
     {
       serialize: String,
       deserialize: (value) => value !== "false", // Default true
-    }
+    },
   );
 
   const [reasoningModel, setReasoningModel] = useLocalStorage(
@@ -119,7 +125,7 @@ export function useSettings() {
     {
       serialize: String,
       deserialize: String,
-    }
+    },
   );
 
   // API keys
@@ -134,23 +140,45 @@ export function useSettings() {
     {
       serialize: String,
       deserialize: String,
-    }
+    },
   );
 
-  const [geminiApiKey, setGeminiApiKey] = useLocalStorage(
-    "geminiApiKey",
-    "",
-    {
-      serialize: String,
-      deserialize: String,
-    }
-  );
+  const [geminiApiKey, setGeminiApiKey] = useLocalStorage("geminiApiKey", "", {
+    serialize: String,
+    deserialize: String,
+  });
 
   // Hotkey
   const [dictationKey, setDictationKey] = useLocalStorage("dictationKey", "", {
     serialize: String,
     deserialize: String,
   });
+
+  // Silence auto-stop settings
+  const [silenceAutoStop, setSilenceAutoStop] = useLocalStorage(
+    "silenceAutoStop",
+    false,
+    {
+      serialize: String,
+      deserialize: (value) => value === "true",
+    },
+  );
+
+  const [silenceThreshold, setSilenceThreshold] = useLocalStorage(
+    "silenceThreshold",
+    1500, // Default 1.5 seconds
+    {
+      serialize: String,
+      deserialize: (value) => {
+        const parsed = parseInt(value, 10);
+        // Validate range: 300ms to 5000ms
+        if (isNaN(parsed) || parsed < 300 || parsed > 5000) {
+          return 1500; // Default
+        }
+        return parsed;
+      },
+    },
+  );
 
   // Computed values
   const reasoningProvider = getModelProvider(reasoningModel);
@@ -181,7 +209,7 @@ export function useSettings() {
       setFallbackWhisperModel,
       setPreferredLanguage,
       setCloudTranscriptionBaseUrl,
-    ]
+    ],
   );
 
   const updateReasoningSettings = useCallback(
@@ -194,7 +222,7 @@ export function useSettings() {
         setCloudReasoningBaseUrl(settings.cloudReasoningBaseUrl);
       // reasoningProvider is computed from reasoningModel, not stored separately
     },
-    [setUseReasoningModel, setReasoningModel, setCloudReasoningBaseUrl]
+    [setUseReasoningModel, setReasoningModel, setCloudReasoningBaseUrl],
   );
 
   const updateApiKeys = useCallback(
@@ -202,10 +230,19 @@ export function useSettings() {
       if (keys.openaiApiKey !== undefined) setOpenaiApiKey(keys.openaiApiKey);
       if (keys.anthropicApiKey !== undefined)
         setAnthropicApiKey(keys.anthropicApiKey);
-      if (keys.geminiApiKey !== undefined)
-        setGeminiApiKey(keys.geminiApiKey);
+      if (keys.geminiApiKey !== undefined) setGeminiApiKey(keys.geminiApiKey);
     },
-    [setOpenaiApiKey, setAnthropicApiKey, setGeminiApiKey]
+    [setOpenaiApiKey, setAnthropicApiKey, setGeminiApiKey],
+  );
+
+  const updateSilenceSettings = useCallback(
+    (settings: Partial<SilenceSettings>) => {
+      if (settings.silenceAutoStop !== undefined)
+        setSilenceAutoStop(settings.silenceAutoStop);
+      if (settings.silenceThreshold !== undefined)
+        setSilenceThreshold(settings.silenceThreshold);
+    },
+    [setSilenceAutoStop, setSilenceThreshold],
   );
 
   return {
@@ -235,7 +272,7 @@ export function useSettings() {
     setUseReasoningModel,
     setReasoningModel,
     setReasoningProvider: (provider: string) => {
-      if (provider === 'custom') {
+      if (provider === "custom") {
         return;
       }
 
@@ -247,15 +284,20 @@ export function useSettings() {
       };
       setReasoningModel(
         providerModels[provider as keyof typeof providerModels] ||
-          "gpt-4o-mini"
+          "gpt-4o-mini",
       );
     },
     setOpenaiApiKey,
     setAnthropicApiKey,
     setGeminiApiKey,
     setDictationKey,
+    silenceAutoStop,
+    silenceThreshold,
+    setSilenceAutoStop,
+    setSilenceThreshold,
     updateTranscriptionSettings,
     updateReasoningSettings,
     updateApiKeys,
+    updateSilenceSettings,
   };
 }
