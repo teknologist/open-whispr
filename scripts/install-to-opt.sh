@@ -7,10 +7,10 @@ set -e
 
 # Get version from package.json
 VERSION=$(node -p "require('./package.json').version")
-APP_NAME="open-whispr"
+APP_NAME="OpenWhispr"
 DIST_DIR="dist"
-TAR_FILE="${DIST_DIR}/${APP_NAME}-${VERSION}.tar.gz"
-EXTRACTED_DIR="${APP_NAME}-${VERSION}"
+TAR_FILE="${DIST_DIR}/${APP_NAME}-${VERSION}-linux-x64.tar.gz"
+EXTRACTED_DIR="${APP_NAME}-${VERSION}-linux-x64"
 INSTALL_DIR="/opt/OpenWhispr"
 
 echo "Installing OpenWhispr v${VERSION} to /opt..."
