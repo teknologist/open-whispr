@@ -182,51 +182,32 @@ class ClipboardManager {
     // Get the text that was copied to clipboard
     const textToType = clipboard.readText();
 
-    // On Wayland, prefer wtype for direct text input (no daemon needed)
-    if (isWayland && commandExists("wtype")) {
-      try {
-        await this.typeWithWtype(textToType);
-        this.safeLog("✅ Text typed successfully using wtype");
-        // Restore original clipboard
-        clipboard.writeText(originalClipboard);
-        return;
-      } catch (error) {
-        this.safeLog(
-          "⚠️ wtype failed, falling back to other methods:",
-          error?.message || error,
+    // On Wayland, use wtype for all text (supports UTF-8 accents)
+    if (isWayland) {
+      if (commandExists("wtype")) {
+        try {
+          await this.typeWithWtype(textToType);
+          this.safeLog("✅ Text typed successfully using wtype");
+          // Restore original clipboard
+          clipboard.writeText(originalClipboard);
+          return;
+        } catch (error) {
+          throw new Error(
+            `wtype failed: ${error?.message || error}. Please ensure wtype is installed and working.`,
+          );
+        }
+      } else {
+        throw new Error(
+          "wtype is required on Wayland. Please install it: https://github.com/atx/wtype",
         );
       }
     }
 
-    // Fallback: try ydotool type (requires ydotoold daemon)
-    if (isWayland && commandExists("ydotool")) {
-      try {
-        await this.typeWithYdotool(textToType);
-        this.safeLog("✅ Text typed successfully using ydotool type");
-        // Restore original clipboard
-        clipboard.writeText(originalClipboard);
-        return;
-      } catch (error) {
-        this.safeLog(
-          "⚠️ ydotool type failed, falling back to paste simulation:",
-          error?.message || error,
-        );
-      }
-    }
-
-    // Fallback: Define paste tools in preference order based on display server
-    const candidates = isWayland
-      ? [
-          // Wayland tools for Ctrl+V simulation
-          { cmd: "wtype", args: ["-M", "ctrl", "-p", "v", "-m", "ctrl"] },
-          { cmd: "ydotool", args: ["key", "29:1", "47:1", "47:0", "29:0"] },
-          // X11 fallback for XWayland
-          { cmd: "xdotool", args: ["key", "ctrl+v"] },
-        ]
-      : [
-          // X11 tools
-          { cmd: "xdotool", args: ["key", "ctrl+v"] },
-        ];
+    // On X11, use Ctrl+V simulation with xdotool
+    const candidates = [
+      // X11 tools
+      { cmd: "xdotool", args: ["key", "ctrl+v"] },
+    ];
 
     // Filter to only available tools
     const available = candidates.filter((c) => commandExists(c.cmd));
@@ -286,53 +267,50 @@ class ClipboardManager {
 
     // All tools failed - create specific error for renderer to handle
     const sessionInfo = isWayland ? "Wayland" : "X11";
-    const errorMsg = `Clipboard copied, but paste simulation failed on ${sessionInfo}. Please install ydotool for automatic typing, or paste manually with Ctrl+V.`;
+    const errorMsg = `Clipboard copied, but paste simulation failed on ${sessionInfo}. Please install the required tool (wtype for Wayland, xdotool for X11), or paste manually with Ctrl+V.`;
     const err = new Error(errorMsg);
     err.code = "PASTE_SIMULATION_FAILED";
     throw err;
   }
 
   // Direct text typing using wtype (bypasses clipboard, no daemon needed)
+  // Supports UTF-8 text including accents and emojis
   async typeWithWtype(text) {
-    // Sanitize input: remove control characters that could cause issues
-    // Keep printable chars, newlines, and tabs
-    const sanitized = text.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, "");
+    const sanitized = text
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "")
+      .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, "");
 
     if (!sanitized) {
-      return; // Nothing to type after sanitization
+      return;
     }
 
     return new Promise((resolve, reject) => {
-      // wtype types text directly when given as argument
-      const proc = spawn("wtype", ["--", sanitized]);
-
-      let timedOut = false;
-      let timeoutId = null;
-
-      const cleanup = () => {
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-          timeoutId = null;
-        }
-        proc.removeAllListeners();
+      // Create enhanced environment with UTF-8 locale
+      const enhancedEnv = {
+        ...process.env,
+        LANG: process.env.LANG || "en_US.UTF-8",
+        LC_ALL: process.env.LC_ALL || "en_US.UTF-8",
+        LC_CTYPE: process.env.LC_CTYPE || "en_US.UTF-8",
       };
 
-      timeoutId = setTimeout(() => {
+      // wtype expects text as a command-line argument, not stdin
+      const proc = spawn("wtype", [sanitized], {
+        env: enhancedEnv,
+      });
+
+      let timedOut = false;
+      const timeoutId = setTimeout(() => {
         timedOut = true;
-        try {
-          proc.kill("SIGKILL");
-        } catch {
-          // Process may have already exited
-        }
-        cleanup();
-        reject(new Error("wtype timed out after 5 seconds"));
+        proc.kill("SIGKILL");
+        reject(new Error("wtype timed out"));
       }, 5000);
 
       proc.on("close", (code) => {
+        clearTimeout(timeoutId);
         if (timedOut) return;
-        cleanup();
-
         if (code === 0) {
+          this.safeLog("✅ wtype completed successfully");
           resolve();
         } else {
           reject(new Error(`wtype exited with code ${code}`));
@@ -340,28 +318,59 @@ class ClipboardManager {
       });
 
       proc.on("error", (error) => {
+        clearTimeout(timeoutId);
         if (timedOut) return;
-        cleanup();
         reject(error);
       });
     });
   }
 
   // Direct text typing using ydotool (bypasses clipboard, requires daemon)
+  // Note: ydotool type doesn't handle UTF-8 accents properly, use wtype for those
   async typeWithYdotool(text) {
     // Sanitize input: remove control characters that could cause issues
-    // Keep printable chars, newlines, and tabs
-    const sanitized = text.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, "");
+    // Keep printable chars, newlines (\n), and tabs (\t)
+    // First convert \r\n to \n, then remove standalone \r
+    const sanitized = text
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "")
+      .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, "");
 
     if (!sanitized) {
       return; // Nothing to type after sanitization
     }
 
     return new Promise((resolve, reject) => {
-      const proc = spawn("ydotool", ["type", "--", sanitized]);
+      // Create enhanced environment with UTF-8 locale
+      const enhancedEnv = {
+        ...process.env,
+        LANG: process.env.LANG || "en_US.UTF-8",
+        LC_ALL: process.env.LC_ALL || "en_US.UTF-8",
+        LC_CTYPE: process.env.LC_CTYPE || "en_US.UTF-8",
+      };
+
+      // Use stdin input to avoid CLI argument encoding issues
+      const proc = spawn(
+        "ydotool",
+        [
+          "type",
+          "--key-delay",
+          "1",
+          "-f", // Read from file
+          "-", // Use stdin as the file
+        ],
+        {
+          env: enhancedEnv,
+        },
+      );
+
+      // Write text to stdin
+      proc.stdin.write(sanitized);
+      proc.stdin.end();
 
       let timedOut = false;
       let timeoutId = null;
+      let stderrOutput = "";
 
       const cleanup = () => {
         if (timeoutId) {
@@ -371,6 +380,11 @@ class ClipboardManager {
         proc.removeAllListeners();
       };
 
+      // Collect stderr for debugging
+      proc.stderr.on("data", (data) => {
+        stderrOutput += data.toString();
+      });
+
       timeoutId = setTimeout(() => {
         timedOut = true;
         try {
@@ -379,6 +393,7 @@ class ClipboardManager {
           // Process may have already exited
         }
         cleanup();
+        this.safeLog("❌ ydotool timed out, stderr:", stderrOutput);
         reject(new Error("ydotool type timed out after 5 seconds"));
       }, 5000); // Longer timeout for typing
 
@@ -387,8 +402,15 @@ class ClipboardManager {
         cleanup();
 
         if (code === 0) {
+          this.safeLog("✅ ydotool completed successfully");
           resolve();
         } else {
+          this.safeLog(
+            "❌ ydotool failed with code",
+            code,
+            "stderr:",
+            stderrOutput,
+          );
           reject(new Error(`ydotool type exited with code ${code}`));
         }
       });
@@ -396,6 +418,7 @@ class ClipboardManager {
       proc.on("error", (error) => {
         if (timedOut) return;
         cleanup();
+        this.safeLog("❌ ydotool error:", error.message);
         reject(error);
       });
     });

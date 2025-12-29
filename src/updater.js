@@ -33,7 +33,7 @@ class UpdateManager {
     // Configure auto-updater for GitHub releases
     autoUpdater.setFeedURL({
       provider: "github",
-      owner: "HeroTools",
+      owner: "teknologist",
       repo: "open-whispr",
       private: false,
     });
@@ -77,13 +77,15 @@ class UpdateManager {
         this.lastUpdateInfo = null;
         this.notifyRenderers("update-not-available", info);
       },
-      "error": (err) => {
+      error: (err) => {
         console.error("❌ Auto-updater error:", err);
         this.isDownloading = false;
         this.notifyRenderers("update-error", err);
       },
       "download-progress": (progressObj) => {
-        console.log(`📥 Download progress: ${progressObj.percent.toFixed(2)}% (${(progressObj.transferred / 1024 / 1024).toFixed(2)}MB / ${(progressObj.total / 1024 / 1024).toFixed(2)}MB)`);
+        console.log(
+          `📥 Download progress: ${progressObj.percent.toFixed(2)}% (${(progressObj.transferred / 1024 / 1024).toFixed(2)}MB / ${(progressObj.total / 1024 / 1024).toFixed(2)}MB)`,
+        );
         this.notifyRenderers("update-download-progress", progressObj);
       },
       "update-downloaded": (info) => {
@@ -99,7 +101,7 @@ class UpdateManager {
           };
         }
         this.notifyRenderers("update-downloaded", info);
-      }
+      },
     };
 
     // Register and track event listeners for cleanup
@@ -110,10 +112,18 @@ class UpdateManager {
   }
 
   notifyRenderers(channel, data) {
-    if (this.mainWindow && !this.mainWindow.isDestroyed() && this.mainWindow.webContents) {
+    if (
+      this.mainWindow &&
+      !this.mainWindow.isDestroyed() &&
+      this.mainWindow.webContents
+    ) {
       this.mainWindow.webContents.send(channel, data);
     }
-    if (this.controlPanelWindow && !this.controlPanelWindow.isDestroyed() && this.controlPanelWindow.webContents) {
+    if (
+      this.controlPanelWindow &&
+      !this.controlPanelWindow.isDestroyed() &&
+      this.controlPanelWindow.webContents
+    ) {
       this.controlPanelWindow.webContents.send(channel, data);
     }
   }
@@ -136,7 +146,12 @@ class UpdateManager {
 
             if (result && result.updateInfo) {
               console.log("📋 Update available:", result.updateInfo.version);
-              console.log("📦 Download size:", result.updateInfo.files?.map(f => `${(f.size / 1024 / 1024).toFixed(2)}MB`).join(", "));
+              console.log(
+                "📦 Download size:",
+                result.updateInfo.files
+                  ?.map((f) => `${(f.size / 1024 / 1024).toFixed(2)}MB`)
+                  .join(", "),
+              );
               return {
                 updateAvailable: true,
                 version: result.updateInfo.version,
@@ -155,7 +170,7 @@ class UpdateManager {
             console.error("❌ Update check error:", error);
             throw error;
           }
-        }
+        },
       },
       {
         channel: "download-update",
@@ -193,7 +208,7 @@ class UpdateManager {
             console.error("❌ Update download error:", error);
             throw error;
           }
-        }
+        },
       },
       {
         channel: "install-update",
@@ -240,7 +255,9 @@ class UpdateManager {
               // 4. Install update and restart (if isForceRunAfter = true)
               autoUpdater.quitAndInstall(false, true);
 
-              console.log("✅ quitAndInstall() called - app should be quitting...");
+              console.log(
+                "✅ quitAndInstall() called - app should be quitting...",
+              );
             }, 100);
 
             return { success: true, message: "Update installation started" };
@@ -253,7 +270,7 @@ class UpdateManager {
             console.error("❌ Update installation error:", error);
             throw error;
           }
-        }
+        },
       },
       {
         channel: "get-app-version",
@@ -265,7 +282,7 @@ class UpdateManager {
             console.error("❌ Error getting app version:", error);
             throw error;
           }
-        }
+        },
       },
       {
         channel: "get-update-status",
@@ -280,7 +297,7 @@ class UpdateManager {
             console.error("❌ Error getting update status:", error);
             throw error;
           }
-        }
+        },
       },
       {
         channel: "get-update-info",
@@ -291,8 +308,8 @@ class UpdateManager {
             console.error("❌ Error getting update info:", error);
             throw error;
           }
-        }
-      }
+        },
+      },
     ];
 
     // Register all handlers and track for cleanup
@@ -308,7 +325,7 @@ class UpdateManager {
       // Wait a bit for the app to fully initialize
       setTimeout(() => {
         console.log("🔄 Checking for updates on startup...");
-        autoUpdater.checkForUpdates().catch(err => {
+        autoUpdater.checkForUpdates().catch((err) => {
           console.error("Startup update check failed:", err);
         });
       }, 3000); // Reduced from 5s to 3s for better UX

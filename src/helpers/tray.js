@@ -9,6 +9,11 @@ class TrayManager {
     this.controlPanelWindow = null;
     this.windowManager = null;
     this.attachedControlPanels = new WeakSet();
+    this.idleIcon = null;
+    this.recordingIcon = null;
+    this.isRecording = false;
+    this.flashInterval = null;
+    this.flashState = false;
   }
 
   setWindows(mainWindow, controlPanelWindow) {
@@ -36,7 +41,6 @@ class TrayManager {
   setCreateControlPanelCallback(callback) {
     this.createControlPanelCallback = callback;
   }
-
 
   attachControlPanelListeners(window) {
     if (!window || this.attachedControlPanels.has(window)) {
@@ -70,10 +74,7 @@ class TrayManager {
       }
       this.attachControlPanelListeners(this.controlPanelWindow);
 
-      if (
-        this.controlPanelWindow &&
-        !this.controlPanelWindow.isDestroyed()
-      ) {
+      if (this.controlPanelWindow && !this.controlPanelWindow.isDestroyed()) {
         if (process.platform === "win32") {
           this.controlPanelWindow.setSkipTaskbar(false);
         }
@@ -92,10 +93,7 @@ class TrayManager {
         }
         this.attachControlPanelListeners(this.controlPanelWindow);
 
-        if (
-          this.controlPanelWindow &&
-          !this.controlPanelWindow.isDestroyed()
-        ) {
+        if (this.controlPanelWindow && !this.controlPanelWindow.isDestroyed()) {
           if (process.platform === "win32") {
             this.controlPanelWindow.setSkipTaskbar(false);
           }
@@ -112,7 +110,8 @@ class TrayManager {
   }
 
   async createTray() {
-    if (process.platform !== "darwin" && process.platform !== "win32") return;
+    // Tray enabled on all platforms (Linux uses SNI protocol for Wayland/COSMIC)
+    if (this.tray) return; // Already created
 
     try {
       const trayIcon = await this.loadTrayIcon();
@@ -120,6 +119,12 @@ class TrayManager {
         console.error("Failed to load tray icon");
         return;
       }
+
+      // Store idle icon reference
+      this.idleIcon = trayIcon;
+
+      // Load recording icon (red-tinted version)
+      this.recordingIcon = await this.loadRecordingIcon();
 
       this.tray = new Tray(trayIcon);
 
@@ -129,8 +134,118 @@ class TrayManager {
 
       this.updateTrayMenu();
       this.setupTrayEventHandlers();
+      console.log("Tray icon created successfully");
     } catch (error) {
       console.error("Error creating tray icon:", error.message);
+    }
+  }
+
+  destroyTray() {
+    if (this.flashInterval) {
+      clearInterval(this.flashInterval);
+      this.flashInterval = null;
+    }
+    if (this.tray) {
+      this.tray.destroy();
+      this.tray = null;
+      this.idleIcon = null;
+      this.recordingIcon = null;
+      console.log("Tray icon destroyed");
+    }
+  }
+
+  async loadRecordingIcon() {
+    const isDevelopment = process.env.NODE_ENV === "development";
+    const fileName = "icon-recording.png";
+    console.log(
+      "[TrayManager] loadRecordingIcon - isDevelopment:",
+      isDevelopment,
+    );
+    console.log("[TrayManager] loadRecordingIcon - __dirname:", __dirname);
+
+    const candidatePaths = isDevelopment
+      ? [path.join(__dirname, "..", "assets", fileName)]
+      : [
+          path.join(process.resourcesPath, "src", "assets", fileName),
+          path.join(process.resourcesPath, "assets", fileName),
+          path.join(app.getAppPath(), "src", "assets", fileName),
+        ];
+
+    console.log(
+      "[TrayManager] loadRecordingIcon - checking paths:",
+      candidatePaths,
+    );
+    for (const testPath of candidatePaths) {
+      try {
+        if (fs.existsSync(testPath)) {
+          const icon = nativeImage.createFromPath(testPath);
+          if (icon && !icon.isEmpty()) {
+            console.log("[TrayManager] Using recording tray icon:", testPath);
+            return icon;
+          }
+        }
+      } catch (error) {
+        console.error("Error loading recording icon:", testPath, error.message);
+      }
+    }
+
+    console.warn("Recording icon not found, flashing will use tooltip only");
+    return null;
+  }
+
+  setRecordingState(isRecording) {
+    console.log("[TrayManager] setRecordingState called:", isRecording);
+    this.isRecording = isRecording;
+
+    // Clear any existing flash interval
+    if (this.flashInterval) {
+      clearInterval(this.flashInterval);
+      this.flashInterval = null;
+    }
+
+    if (!this.tray) {
+      console.log("[TrayManager] No tray instance, skipping");
+      return;
+    }
+
+    console.log("[TrayManager] Recording icon loaded:", !!this.recordingIcon);
+
+    try {
+      if (isRecording) {
+        // Start flashing between idle and recording icon
+        this.flashState = true;
+        this.updateTrayIcon();
+        this.tray.setToolTip("🔴 Recording...");
+
+        // Flash the icon every 500ms
+        this.flashInterval = setInterval(() => {
+          this.flashState = !this.flashState;
+          this.updateTrayIcon();
+        }, 500);
+      } else {
+        // Stop flashing and restore idle icon
+        this.flashState = false;
+        if (this.idleIcon) {
+          this.tray.setImage(this.idleIcon);
+        }
+        this.tray.setToolTip("OpenWhispr - Voice Dictation");
+      }
+    } catch (error) {
+      console.error("Failed to update tray state:", error.message);
+    }
+  }
+
+  updateTrayIcon() {
+    if (!this.tray) return;
+
+    try {
+      if (this.flashState && this.recordingIcon) {
+        this.tray.setImage(this.recordingIcon);
+      } else if (this.idleIcon) {
+        this.tray.setImage(this.idleIcon);
+      }
+    } catch (error) {
+      console.error("Failed to update tray icon:", error.message);
     }
   }
 
@@ -143,21 +258,33 @@ class TrayManager {
     if (platform === "darwin") {
       if (isDevelopment) {
         candidatePaths.push(
-          path.join(__dirname, "..", "assets", "iconTemplate@3x.png")
+          path.join(__dirname, "..", "assets", "iconTemplate@3x.png"),
         );
       } else {
         candidatePaths.push(
-          path.join(process.resourcesPath, "src", "assets", "iconTemplate@3x.png"),
+          path.join(
+            process.resourcesPath,
+            "src",
+            "assets",
+            "iconTemplate@3x.png",
+          ),
           path.join(process.resourcesPath, "assets", "iconTemplate@3x.png"),
           path.join(
             process.resourcesPath,
             "app.asar.unpacked",
             "src",
             "assets",
-            "iconTemplate@3x.png"
+            "iconTemplate@3x.png",
           ),
-          path.join(__dirname, "..", "..", "src", "assets", "iconTemplate@3x.png"),
-          path.join(app.getAppPath(), "src", "assets", "iconTemplate@3x.png")
+          path.join(
+            __dirname,
+            "..",
+            "..",
+            "src",
+            "assets",
+            "iconTemplate@3x.png",
+          ),
+          path.join(app.getAppPath(), "src", "assets", "iconTemplate@3x.png"),
         );
       }
     } else {
@@ -165,7 +292,7 @@ class TrayManager {
       if (isDevelopment) {
         candidatePaths.push(
           path.join(__dirname, "..", "assets", fileName),
-          path.join(__dirname, "..", "assets", "icon.png")
+          path.join(__dirname, "..", "assets", "icon.png"),
         );
       } else {
         candidatePaths.push(
@@ -176,10 +303,10 @@ class TrayManager {
             "app.asar.unpacked",
             "src",
             "assets",
-            fileName
+            fileName,
           ),
           path.join(__dirname, "..", "..", "src", "assets", fileName),
-          path.join(app.getAppPath(), "src", "assets", fileName)
+          path.join(app.getAppPath(), "src", "assets", fileName),
         );
       }
     }
@@ -197,7 +324,11 @@ class TrayManager {
           }
         }
       } catch (error) {
-        console.error("Error checking tray icon path:", testPath, error.message);
+        console.error(
+          "Error checking tray icon path:",
+          testPath,
+          error.message,
+        );
       }
     }
 
@@ -240,17 +371,20 @@ class TrayManager {
   }
 
   buildContextMenuTemplate() {
-    const dictationVisible = this.windowManager?.isDictationPanelVisible?.() ?? false;
+    const dictationVisible =
+      this.windowManager?.isDictationPanelVisible?.() ?? false;
 
     return [
       {
-        label: dictationVisible ? "Hide Dictation Panel" : "Show Dictation Panel",
+        label: dictationVisible
+          ? "Hide Dictation Panel"
+          : "Show Dictation Panel",
         click: () => {
           if (!this.windowManager) return;
           if (this.windowManager.isDictationPanelVisible()) {
             this.windowManager.hideDictationPanel();
           } else {
-            this.windowManager.showDictationPanel({ focus: true });
+            this.windowManager.showDictationPanel({ focus: true, force: true });
           }
           this.updateTrayMenu();
         },

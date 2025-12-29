@@ -67,7 +67,7 @@ export const usePermissions = (
           showAlertDialog({
             title: "✅ Text Input Test Successful",
             description:
-              "ydotool is working! Check if the test text appeared in another app. If not, make sure ydotool daemon is running and you're in the 'input' group.",
+              "wtype is working! Check if the test text appeared in another app.",
           });
         } else {
           showAlertDialog({
@@ -79,7 +79,7 @@ export const usePermissions = (
       } else {
         alert(
           isWayland
-            ? "✅ ydotool working! Check if the test text appeared in another app."
+            ? "✅ wtype working! Check if the test text appeared in another app."
             : "✅ Accessibility permissions working! Check if the test text appeared in another app.",
         );
       }
@@ -90,16 +90,9 @@ export const usePermissions = (
 
       if (showAlertDialog) {
         if (isWayland) {
-          // Check if it's specifically the paste simulation failure
-          const isYdotoolMissing =
-            errorMessage.includes("PASTE_SIMULATION_FAILED") ||
-            errorMessage.includes("ydotool");
-
           showAlertDialog({
             title: "❌ Text Input Failed",
-            description: isYdotoolMissing
-              ? "ydotool is not configured correctly. Please ensure:\n\n1. ydotool is installed\n2. The ydotool daemon is running (sudo systemctl start ydotool)\n3. Your user is in the 'input' group (sudo usermod -aG input $USER)\n4. You've logged out and back in after group changes"
-              : `Text input failed: ${errorMessage}. Make sure ydotool is installed and configured.`,
+            description: `wtype is not installed or not working.\n\nPlease install wtype:\n• Arch: sudo pacman -S wtype\n• Debian/Ubuntu: sudo apt install wtype\n• Fedora: sudo dnf install wtype\n\nError: ${errorMessage}`,
           });
         } else {
           showAlertDialog({
@@ -111,7 +104,7 @@ export const usePermissions = (
       } else {
         alert(
           isWayland
-            ? "❌ ydotool not working! Please check the Settings page for setup instructions."
+            ? "❌ wtype not working! Please check the Settings page for setup instructions."
             : "❌ Accessibility permissions needed! Please grant them in System Settings.",
         );
       }

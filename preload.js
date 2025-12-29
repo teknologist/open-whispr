@@ -102,6 +102,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
   checkFFmpegAvailability: () =>
     ipcRenderer.invoke("check-ffmpeg-availability"),
 
+  // Whisper server management (for GPU model preloading)
+  whisperServerStart: (modelName) =>
+    ipcRenderer.invoke("whisper-server-start", modelName),
+  whisperServerStop: () => ipcRenderer.invoke("whisper-server-stop"),
+  whisperServerStatus: () => ipcRenderer.invoke("whisper-server-status"),
+  whisperServerReload: (modelName) =>
+    ipcRenderer.invoke("whisper-server-reload", modelName),
+
   // Window control functions
   windowMinimize: () => ipcRenderer.invoke("window-minimize"),
   windowMaximize: () => ipcRenderer.invoke("window-maximize"),
@@ -121,6 +129,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
   stopWindowDrag: () => ipcRenderer.invoke("stop-window-drag"),
   setMainWindowInteractivity: (interactive) =>
     ipcRenderer.invoke("set-main-window-interactivity", interactive),
+
+  // Feedback settings functions
+  setHideIndicatorWindow: (hide) =>
+    ipcRenderer.invoke("set-hide-indicator-window", hide),
+  setTrayEnabled: (enabled) => ipcRenderer.invoke("set-tray-enabled", enabled),
+  setRecordingState: (isRecording) =>
+    ipcRenderer.invoke("set-recording-state", isRecording),
+  playAudioFeedback: (sound) =>
+    ipcRenderer.invoke("play-audio-feedback", sound),
 
   // Update functions
   checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),

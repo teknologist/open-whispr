@@ -1,0 +1,10 @@
+# OpenWhispr Python Dependencies
+# Install with: uv pip install -r requirements.txt
+# Or: pip install -r requirements.txt
+
+# Core STT engine - supports both Whisper and Distil-Whisper models
+faster-whisper>=1.0.0
+
+# Optional: For GPU acceleration (CUDA)
+# torch>=2.0.0
+# ctranslate2>=4.0.0

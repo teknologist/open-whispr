@@ -18,10 +18,15 @@ class WindowManager {
     this.dragManager = new DragManager();
     this.isQuitting = false;
     this.isMainWindowInteractive = false;
+    this.hideIndicatorWindow = false;
 
     app.on("before-quit", () => {
       this.isQuitting = true;
     });
+  }
+
+  setHideIndicatorWindow(hide) {
+    this.hideIndicatorWindow = hide;
   }
 
   async createMainWindow() {
@@ -111,7 +116,10 @@ class WindowManager {
 
   async initializeHotkey() {
     const callback = () => {
-      this.showDictationPanel(); // Use showInactive() to avoid stealing focus
+      // Only show indicator window if not hidden by user preference
+      if (!this.hideIndicatorWindow) {
+        this.showDictationPanel();
+      }
       this.mainWindow.webContents.send("toggle-dictation");
     };
 
@@ -120,7 +128,10 @@ class WindowManager {
 
   async updateHotkey(hotkey) {
     const callback = () => {
-      this.showDictationPanel(); // Use showInactive() to avoid stealing focus
+      // Only show indicator window if not hidden by user preference
+      if (!this.hideIndicatorWindow) {
+        this.showDictationPanel();
+      }
       this.mainWindow.webContents.send("toggle-dictation");
     };
 
@@ -199,7 +210,16 @@ class WindowManager {
   }
 
   showDictationPanel(options = {}) {
-    const { focus = false } = options;
+    const { focus = false, force = false } = options;
+
+    // Respect hideIndicatorWindow setting unless force=true
+    if (!force && this.hideIndicatorWindow) {
+      console.log(
+        "[WindowManager] showDictationPanel skipped - hideIndicatorWindow is enabled",
+      );
+      return;
+    }
+
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
       const isVisible = this.mainWindow.isVisible();
       const isMinimized = this.mainWindow.isMinimized();

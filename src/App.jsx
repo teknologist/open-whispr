@@ -5,6 +5,7 @@ import { LoadingDots } from "./components/ui/LoadingDots";
 import { useHotkey } from "./hooks/useHotkey";
 import { useWindowDrag } from "./hooks/useWindowDrag";
 import { useAudioRecording } from "./hooks/useAudioRecording";
+import { useFeedbackSettings, useSettings } from "./hooks/useSettings";
 
 // Sound Wave Icon Component (for idle/hover states)
 const SoundWaveIcon = ({ size = 16 }) => {
@@ -105,12 +106,104 @@ export default function App() {
     setWindowInteractivity(false);
   }, [setWindowInteractivity]);
 
-  const { isRecording, isProcessing, toggleListening } = useAudioRecording(
-    toast,
-    {
+  const { isRecording, isProcessing, toggleListening, cancelRecording } =
+    useAudioRecording(toast, {
       onToggle: handleDictationToggle,
-    },
-  );
+    });
+
+  // Feedback settings for tray icon and audio feedback
+  const {
+    showTrayIcon,
+    hideIndicatorWindow,
+    audioFeedbackEnabled,
+    soundOnRecordStart,
+    soundOnRecordStop,
+  } = useFeedbackSettings();
+  const prevIsRecordingRef = useRef(isRecording);
+
+  // Settings for Whisper server
+  const { useLocalWhisper, whisperModel } = useSettings();
+
+  // Start Whisper server on mount if local Whisper is enabled (preloads model to GPU)
+  useEffect(() => {
+    let isMounted = true;
+    let serverStarted = false;
+
+    const initWhisperServer = async () => {
+      if (useLocalWhisper && whisperModel) {
+        try {
+          console.log(`[App] Checking Whisper server status...`);
+          const status = await window.electronAPI?.whisperServerStatus?.();
+
+          if (!status?.running || status?.model !== whisperModel) {
+            console.log(
+              `[App] Starting Whisper server with model '${whisperModel}'...`,
+            );
+            const result =
+              await window.electronAPI?.whisperServerStart?.(whisperModel);
+            if (isMounted && result?.success) {
+              console.log(`[App] Whisper server started successfully`);
+              serverStarted = true;
+            } else if (isMounted && result?.error) {
+              console.warn(
+                `[App] Failed to start Whisper server: ${result.error}`,
+              );
+            }
+          } else {
+            console.log(
+              `[App] Whisper server already running with model '${whisperModel}'`,
+            );
+          }
+        } catch (error) {
+          console.warn(
+            `[App] Failed to initialize Whisper server: ${error.message}`,
+          );
+        }
+      }
+    };
+
+    initWhisperServer();
+
+    // Cleanup: stop server on unmount if we started it
+    return () => {
+      isMounted = false;
+      if (serverStarted) {
+        window.electronAPI?.whisperServerStop?.().catch(() => {
+          // Ignore cleanup errors
+        });
+      }
+    };
+  }, [useLocalWhisper, whisperModel]);
+
+  // Sync feedback settings to main process whenever they change
+  useEffect(() => {
+    window.electronAPI?.setHideIndicatorWindow?.(hideIndicatorWindow);
+  }, [hideIndicatorWindow]);
+
+  useEffect(() => {
+    window.electronAPI?.setTrayEnabled?.(showTrayIcon);
+  }, [showTrayIcon]);
+
+  // Update tray icon state and play audio feedback when recording state changes
+  useEffect(() => {
+    // Update tray icon state
+    window.electronAPI?.setRecordingState?.(isRecording);
+
+    // Play audio feedback only on state change (not on initial mount)
+    if (audioFeedbackEnabled && prevIsRecordingRef.current !== isRecording) {
+      const sound = isRecording ? soundOnRecordStart : soundOnRecordStop;
+      if (sound !== "none") {
+        window.electronAPI?.playAudioFeedback?.(sound);
+      }
+    }
+
+    prevIsRecordingRef.current = isRecording;
+  }, [
+    isRecording,
+    audioFeedbackEnabled,
+    soundOnRecordStart,
+    soundOnRecordStop,
+  ]);
 
   const handleClose = () => {
     window.electronAPI.hideWindow();
@@ -138,9 +231,20 @@ export default function App() {
   useEffect(() => {
     const handleKeyPress = (e) => {
       if (e.key === "Escape") {
+        // Priority 1: Cancel recording/transcription if active
+        if (isRecording || isProcessing) {
+          console.log(
+            "[App] Escape pressed - cancelling recording/transcription",
+          );
+          cancelRecording();
+          window.electronAPI?.hideWindow?.();
+          return;
+        }
+        // Priority 2: Close command menu if open
         if (isCommandMenuOpen) {
           setIsCommandMenuOpen(false);
         } else {
+          // Priority 3: Hide window
           handleClose();
         }
       }
@@ -148,7 +252,7 @@ export default function App() {
 
     document.addEventListener("keydown", handleKeyPress);
     return () => document.removeEventListener("keydown", handleKeyPress);
-  }, [isCommandMenuOpen]);
+  }, [isCommandMenuOpen, isRecording, isProcessing, cancelRecording]);
 
   // Determine current mic state
   const getMicState = () => {

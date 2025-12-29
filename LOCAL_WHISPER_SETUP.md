@@ -45,12 +45,24 @@ Your OpenWhispr app has been successfully refactored to support **local Whisper 
 ### Step 2: Enable Local Whisper
 - Check the "Use Local Whisper (Privacy Mode)" checkbox
 - Select your desired model:
+
+  **Standard Whisper Models (True Multilingual):**
   - **Tiny**: Fastest, lowest quality (39M params)
   - **Base**: Balanced speed/quality (74M params) - Recommended
   - **Small**: Better quality, slower (244M params)
   - **Medium**: High quality, much slower (769M params)
   - **Large**: Best quality, very slow (1550M params)
   - **Turbo**: Fast with good quality (809M params)
+
+  ℹ️ *Standard models output text in the same language as the spoken audio (true multilingual support).*
+
+  **Distil-Whisper Models (6x faster, English output only):**
+  - **Distil-Small.en**: Fast, English input/output only (166M params)
+  - **Distil-Medium.en**: Balanced, English input/output only (394M params)
+  - **Distil-Large-v2**: Fast, multilingual input → English output (756M params)
+  - **Distil-Large-v3**: Latest, multilingual input → English output (756M params)
+
+  ⚠️ *Distil models always output English text, even when transcribing non-English audio. Use standard Whisper models for non-English dictation.*
 
 ### Step 3: Save Settings
 - Click "Save Whisper Settings"
@@ -87,7 +99,7 @@ The following are now **bundled with the app** and require no user installation:
 For **local Whisper processing**, users still need:
 
 - ✅ **Python 3**: Installed via Homebrew or system package manager
-- ✅ **OpenAI Whisper**: Installed via `pip3 install openai-whisper`
+- ✅ **Faster-Whisper**: Installed via `pip3 install faster-whisper` (or `uv pip install faster-whisper`)
 
 **Note**: FFmpeg is now bundled, so users no longer need to install it separately!
 
@@ -123,6 +135,8 @@ The app is configured with intelligent fallback:
 
 ## 📊 Model Performance Guide
 
+### Standard Whisper Models
+
 | Model  | Size  | Speed    | Quality | Memory | Best For |
 |--------|-------|----------|---------|--------|----------|
 | Tiny   | 39M   | Fastest  | Basic   | ~1GB   | Quick notes |
@@ -131,6 +145,15 @@ The app is configured with intelligent fallback:
 | Medium | 769M  | Slow     | High    | ~5GB   | High accuracy needed |
 | Large  | 1550M | Slowest  | Best    | ~10GB  | Maximum quality |
 | Turbo  | 809M  | Fast     | High    | ~6GB   | Best balance |
+
+### Distil-Whisper Models (6x Faster)
+
+| Model           | Size  | Speed      | Quality | Memory | Best For |
+|-----------------|-------|------------|---------|--------|----------|
+| Distil-Small.en | 166M  | Very Fast  | Good    | ~1GB   | English dictation |
+| Distil-Medium.en| 394M  | Fast       | Better  | ~2GB   | English professional |
+| Distil-Large-v2 | 756M  | Fast       | High    | ~3GB   | Multilingual |
+| Distil-Large-v3 | 756M  | Fast       | Best    | ~3GB   | **Recommended for speed** |
 
 ## 🛠 Troubleshooting
 
@@ -163,8 +186,8 @@ If you need to force a specific interpreter, set the `OPENWHISPR_PYTHON` environ
 The new detector also scans the Windows `py` launcher plus the usual install folders, so manual code edits are no longer required.
 
 ### Model Storage Location
-Models are downloaded to `~/.cache/whisper/` by default.
-You can change this by modifying the bridge script.
+Models are downloaded to `~/.cache/huggingface/hub/` by default (standard HuggingFace cache location).
+This is shared with other HuggingFace models you may have downloaded.
 
 ### Timeout Settings
 Current timeout is 30 seconds. To change:

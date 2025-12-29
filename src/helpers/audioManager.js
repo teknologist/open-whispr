@@ -28,9 +28,18 @@ const debugLogger = {
 
 // Default silence detection settings
 const DEFAULT_SILENCE_THRESHOLD_MS = 1500; // 1.5 seconds
-const SILENCE_CHECK_INTERVAL_MS = 100; // Check every 100ms
-const SILENCE_AMPLITUDE_THRESHOLD = 0.02; // RMS level below this is considered silence
-const FREQUENCY_DATA_MAX = 255; // Uint8Array max value for frequency data
+const SILENCE_CHECK_INTERVAL_MS = 200; // Check every 200ms (balance between responsiveness and CPU usage)
+
+// Adaptive silence detection settings (handles background noise)
+const AMBIENT_CALIBRATION_MS = 800; // Time to measure ambient noise at start
+const AMBIENT_CALIBRATION_SAMPLES = Math.ceil(
+  AMBIENT_CALIBRATION_MS / SILENCE_CHECK_INTERVAL_MS,
+); // ~8 samples
+const AMBIENT_SKIP_INITIAL_SAMPLES = 2; // Skip first 2 samples (hotkey click noise)
+const SPEECH_TO_AMBIENT_RATIO = 2.5; // Speech must be 2.5x louder than ambient to be detected
+const SILENCE_TO_AMBIENT_RATIO = 1.3; // Audio must drop to within 1.3x of ambient to be "silence"
+const MAX_ACCEPTABLE_AMBIENT_RMS = 0.15; // Reject environments noisier than this (~15% of full scale)
+const MIN_AMBIENT_RMS = 0.003; // Floor for ambient noise (handles very quiet environments)
 
 class AudioManager {
   constructor() {
@@ -41,7 +50,7 @@ class AudioManager {
     this.onStateChange = null;
     this.onError = null;
     this.onTranscriptionComplete = null;
-    this.cachedApiKey = null;
+    // Note: API keys are not cached in renderer for security - fetched fresh each time
     this.cachedTranscriptionEndpoint = null;
     this.recordingStartTime = null;
     this.reasoningAvailabilityCache = { value: false, expiresAt: 0 };
@@ -55,6 +64,15 @@ class AudioManager {
     this.silenceStartTime = null;
     this.hasDetectedSpeech = false; // Only stop after speech has been detected
     this.cachedSilenceSettings = null; // Cache to avoid repeated localStorage reads
+
+    // Adaptive ambient noise calibration
+    this.ambientCalibrationSamples = []; // RMS samples during calibration
+    this.ambientNoiseLevel = null; // Calculated ambient noise level
+    this.isCalibrating = true; // Whether we're still in calibration phase
+    this.ambientTooLoud = false; // Flag if environment is too noisy
+
+    // Atomic state flag to prevent race conditions during stop
+    this._isStopping = false;
   }
 
   // Get silence settings from localStorage
@@ -66,7 +84,7 @@ class AudioManager {
     return { enabled, threshold };
   }
 
-  // Check if current audio level is silence using RMS for accuracy
+  // Check if current audio level is silence using adaptive RMS threshold
   checkAudioLevel() {
     // Debug: log first call to verify interval is running
     if (!this._firstCheckLogged) {
@@ -89,6 +107,21 @@ class AudioManager {
     const { enabled, threshold } = this.cachedSilenceSettings || {};
     if (!enabled) return;
 
+    // Skip if environment was determined to be too noisy
+    if (this.ambientTooLoud) {
+      // Debug log to understand why silence detection isn't working
+      if (!this._ambientTooLoudLogged) {
+        this._ambientTooLoudLogged = true;
+        console.log(
+          "[AudioManager] Skipping audio check - environment too noisy",
+        );
+        window.electronAPI?.logReasoning?.("SILENCE_SKIPPED_TOO_LOUD", {
+          reason: "Environment too noisy for silence detection",
+        });
+      }
+      return;
+    }
+
     // Use time domain data for more accurate RMS calculation
     const timeDomainArray = new Uint8Array(this.analyser.fftSize);
     this.analyser.getByteTimeDomainData(timeDomainArray);
@@ -101,14 +134,87 @@ class AudioManager {
       ) / timeDomainArray.length,
     );
 
+    // --- Ambient noise calibration phase ---
+    if (this.isCalibrating) {
+      this.ambientCalibrationSamples.push(rms);
+
+      if (
+        this.ambientCalibrationSamples.length >= AMBIENT_CALIBRATION_SAMPLES
+      ) {
+        // Skip initial samples (hotkey click, mic activation noise)
+        const validSamples = this.ambientCalibrationSamples.slice(
+          AMBIENT_SKIP_INITIAL_SAMPLES,
+        );
+
+        // Use 25th percentile (lower quartile) to avoid transient noise spikes
+        // This is more robust than minimum (which could be an anomaly) or average (which is skewed by spikes)
+        const sortedSamples = [...validSamples].sort((a, b) => a - b);
+        const percentileIndex = Math.floor(sortedSamples.length * 0.25);
+        const ambientEstimate = sortedSamples[percentileIndex];
+
+        // Apply floor to handle very quiet environments
+        this.ambientNoiseLevel = Math.max(ambientEstimate, MIN_AMBIENT_RMS);
+        this.isCalibrating = false;
+
+        // Check if environment is too noisy
+        if (this.ambientNoiseLevel > MAX_ACCEPTABLE_AMBIENT_RMS) {
+          this.ambientTooLoud = true;
+          console.warn(
+            "[AudioManager] Environment too noisy for silence detection:",
+            this.ambientNoiseLevel.toFixed(4),
+          );
+          window.electronAPI?.logReasoning?.("AMBIENT_TOO_LOUD", {
+            ambientLevel: this.ambientNoiseLevel.toFixed(4),
+            maxAcceptable: MAX_ACCEPTABLE_AMBIENT_RMS,
+          });
+          this.onError?.({
+            title: "Noisy Environment Detected",
+            description:
+              "Background noise is too high for auto-stop. Recording will continue normally - press hotkey to stop.",
+          });
+          return;
+        }
+
+        console.log("[AudioManager] Ambient calibration complete:", {
+          rawSamples: this.ambientCalibrationSamples.map((s) => s.toFixed(4)),
+          validSamples: validSamples.map((s) => s.toFixed(4)),
+          ambientLevel: this.ambientNoiseLevel.toFixed(4),
+          speechThreshold: (
+            this.ambientNoiseLevel * SPEECH_TO_AMBIENT_RATIO
+          ).toFixed(4),
+          silenceThreshold: (
+            this.ambientNoiseLevel * SILENCE_TO_AMBIENT_RATIO
+          ).toFixed(4),
+        });
+        window.electronAPI?.logReasoning?.("AMBIENT_CALIBRATION_COMPLETE", {
+          rawSamples: this.ambientCalibrationSamples.map((s) => s.toFixed(4)),
+          skippedSamples: AMBIENT_SKIP_INITIAL_SAMPLES,
+          ambientLevel: this.ambientNoiseLevel.toFixed(4),
+          speechThreshold: (
+            this.ambientNoiseLevel * SPEECH_TO_AMBIENT_RATIO
+          ).toFixed(4),
+          silenceThreshold: (
+            this.ambientNoiseLevel * SILENCE_TO_AMBIENT_RATIO
+          ).toFixed(4),
+        });
+      }
+      return; // Still calibrating, don't check for silence yet
+    }
+
+    // --- Active silence detection with adaptive threshold ---
+    const speechThreshold = this.ambientNoiseLevel * SPEECH_TO_AMBIENT_RATIO;
+    const silenceThreshold = this.ambientNoiseLevel * SILENCE_TO_AMBIENT_RATIO;
+
     // Debug log every 3 seconds to avoid spam (every 30 checks at 100ms interval)
     if (!this._debugLogCounter) this._debugLogCounter = 0;
     this._debugLogCounter++;
     if (this._debugLogCounter % 30 === 0) {
       const logData = {
         rms: rms.toFixed(4),
-        amplitudeThreshold: SILENCE_AMPLITUDE_THRESHOLD,
-        isSilence: rms < SILENCE_AMPLITUDE_THRESHOLD,
+        ambientLevel: this.ambientNoiseLevel?.toFixed(4),
+        speechThreshold: speechThreshold.toFixed(4),
+        silenceThreshold: silenceThreshold.toFixed(4),
+        isSilence: rms < silenceThreshold,
         hasDetectedSpeech: this.hasDetectedSpeech,
         silenceDurationMs: this.silenceStartTime
           ? Date.now() - this.silenceStartTime
@@ -116,24 +222,34 @@ class AudioManager {
         configuredThresholdMs: threshold,
       };
       console.log("[AudioManager] Audio level check:", logData);
-      // Also log via IPC to terminal
       window.electronAPI?.logReasoning?.("AUDIO_LEVEL_CHECK", logData);
     }
 
-    if (rms < SILENCE_AMPLITUDE_THRESHOLD) {
-      // Currently silence
+    // Check for silence (audio dropped back near ambient level)
+    if (rms < silenceThreshold) {
+      // Currently silence (relative to ambient)
       if (!this.silenceStartTime) {
         this.silenceStartTime = Date.now();
       } else if (this.hasDetectedSpeech) {
         // Only auto-stop after we've detected some speech
         const silenceDuration = Date.now() - this.silenceStartTime;
         if (silenceDuration >= threshold) {
+          // Atomic check-and-set to prevent race conditions
+          if (this._isStopping) {
+            return; // Already stopping, don't trigger again
+          }
+          this._isStopping = true;
+
           console.log(
             "[AudioManager] Auto-stopping due to silence after",
             silenceDuration,
-            "ms",
+            "ms (ambient:",
+            this.ambientNoiseLevel?.toFixed(4),
+            ", current:",
+            rms.toFixed(4),
+            ")",
           );
-          // Clear interval first to prevent re-triggering (race condition fix)
+          // Clear interval first to prevent re-triggering
           if (this.silenceCheckInterval) {
             clearInterval(this.silenceCheckInterval);
             this.silenceCheckInterval = null;
@@ -145,17 +261,24 @@ class AudioManager {
         }
       }
     } else {
-      // Not silence - reset timer and mark that we've detected speech
-      if (!this.hasDetectedSpeech) {
-        console.log("[AudioManager] Speech detected, RMS:", rms.toFixed(4));
-      }
+      // Not silence - reset timer
       this.silenceStartTime = null;
-      this.hasDetectedSpeech = true;
+
+      // Detect speech (significantly above ambient)
+      if (rms > speechThreshold && !this.hasDetectedSpeech) {
+        console.log(
+          "[AudioManager] Speech detected, RMS:",
+          rms.toFixed(4),
+          "threshold:",
+          speechThreshold.toFixed(4),
+        );
+        this.hasDetectedSpeech = true;
+      }
     }
   }
 
   // Start monitoring audio levels for silence detection
-  startSilenceDetection(stream) {
+  async startSilenceDetection(stream) {
     // Get settings first to check if enabled (before cleanup which clears cache)
     const settings = this.getSilenceSettings();
 
@@ -177,7 +300,7 @@ class AudioManager {
     }
 
     // Clean up any existing detection first (prevents AudioContext accumulation)
-    this.stopSilenceDetection();
+    await this.stopSilenceDetection();
 
     // Cache settings AFTER cleanup (stopSilenceDetection clears cachedSilenceSettings)
     this.cachedSilenceSettings = settings;
@@ -194,11 +317,29 @@ class AudioManager {
         this.audioContext.createMediaStreamSource(stream);
       this.silenceDetectionSource.connect(this.analyser);
 
+      // IMPORTANT: Resume AudioContext if suspended (required in modern browsers)
+      console.log(
+        "[AudioManager] AudioContext state before resume:",
+        this.audioContext.state,
+      );
+      if (this.audioContext.state === "suspended") {
+        await this.audioContext.resume();
+        console.log("[AudioManager] AudioContext resumed successfully");
+      }
+
       // Reset silence tracking
       this.silenceStartTime = null;
       this.hasDetectedSpeech = false;
       this._firstCheckLogged = false; // Reset debug flag for new recording
       this._debugLogCounter = 0; // Reset counter
+      this._isStopping = false; // Reset atomic stop flag
+      this._ambientTooLoudLogged = false; // Reset debug flag for new recording
+
+      // Reset ambient calibration for new recording
+      this.ambientCalibrationSamples = [];
+      this.ambientNoiseLevel = null;
+      this.isCalibrating = true;
+      this.ambientTooLoud = false;
 
       // Start checking audio levels
       this.silenceCheckInterval = setInterval(() => {
@@ -218,7 +359,7 @@ class AudioManager {
   }
 
   // Stop silence detection and cleanup
-  stopSilenceDetection() {
+  async stopSilenceDetection() {
     if (this.silenceCheckInterval) {
       clearInterval(this.silenceCheckInterval);
       this.silenceCheckInterval = null;
@@ -234,8 +375,13 @@ class AudioManager {
       this.silenceDetectionSource = null;
     }
 
+    // IMPORTANT: Await the close to ensure AudioContext is fully closed before creating a new one
     if (this.audioContext && this.audioContext.state !== "closed") {
-      this.audioContext.close().catch(() => {});
+      try {
+        await this.audioContext.close();
+      } catch {
+        // Ignore close errors
+      }
     }
 
     this.audioContext = null;
@@ -243,6 +389,71 @@ class AudioManager {
     this.silenceStartTime = null;
     this.hasDetectedSpeech = false;
     this.cachedSilenceSettings = null;
+    this._isStopping = false; // Reset atomic stop flag
+
+    // Reset ambient calibration state
+    this.ambientCalibrationSamples = [];
+    this.ambientNoiseLevel = null;
+    this.isCalibrating = true;
+    this.ambientTooLoud = false;
+  }
+
+  // Analyze audio blob to detect if it contains speech or is just silence
+  async analyzeAudioForSpeech(audioBlob) {
+    let audioContext = null;
+    try {
+      const arrayBuffer = await audioBlob.arrayBuffer();
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+      // Decode the audio data
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      const channelData = audioBuffer.getChannelData(0); // Get first channel
+
+      // Calculate RMS (Root Mean Square) of the audio
+      let sumSquares = 0;
+      for (let i = 0; i < channelData.length; i++) {
+        sumSquares += channelData[i] * channelData[i];
+      }
+      const rms = Math.sqrt(sumSquares / channelData.length);
+
+      // Also calculate peak amplitude
+      let peak = 0;
+      for (let i = 0; i < channelData.length; i++) {
+        const abs = Math.abs(channelData[i]);
+        if (abs > peak) peak = abs;
+      }
+
+      // Threshold for detecting speech (adjusted for typical microphone input)
+      // RMS below 0.01 is usually silence/noise, above 0.02 indicates speech
+      const SPEECH_RMS_THRESHOLD = 0.015;
+      const SPEECH_PEAK_THRESHOLD = 0.1;
+
+      const hasSpeech =
+        rms > SPEECH_RMS_THRESHOLD || peak > SPEECH_PEAK_THRESHOLD;
+
+      console.log("[AudioManager] Audio analysis:", {
+        rms: rms.toFixed(4),
+        peak: peak.toFixed(4),
+        duration: audioBuffer.duration.toFixed(2),
+        hasSpeech,
+        thresholds: { rms: SPEECH_RMS_THRESHOLD, peak: SPEECH_PEAK_THRESHOLD },
+      });
+
+      return hasSpeech;
+    } catch (error) {
+      console.error("[AudioManager] Error analyzing audio:", error);
+      // If analysis fails, proceed with transcription
+      return true;
+    } finally {
+      // Always close AudioContext to prevent memory leak
+      if (audioContext && audioContext.state !== "closed") {
+        try {
+          await audioContext.close();
+        } catch {
+          // Ignore close errors
+        }
+      }
+    }
   }
 
   setCallbacks({ onStateChange, onError, onTranscriptionComplete }) {
@@ -269,22 +480,77 @@ class AudioManager {
 
       this.mediaRecorder.onstop = async () => {
         console.log("[AudioManager] onstop callback triggered");
+
+        // Check if recording was cancelled (Escape key)
+        if (this._cancelledRecording) {
+          console.log(
+            "[AudioManager] Recording was cancelled - skipping transcription",
+          );
+          this._cancelledRecording = false;
+          this.isRecording = false;
+          this.isProcessing = false;
+          this.onStateChange?.({ isRecording: false, isProcessing: false });
+          // Clean up stream
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        // Capture speech detection state BEFORE stopping silence detection (which clears it)
+        const speechWasDetected = this.hasDetectedSpeech;
+        const silenceDetectionWasEnabled =
+          !!this.cachedSilenceSettings?.enabled;
+        console.log(
+          "[AudioManager] Speech detected:",
+          speechWasDetected,
+          "Silence detection enabled:",
+          silenceDetectionWasEnabled,
+        );
+
         // Stop silence detection immediately
-        this.stopSilenceDetection();
+        await this.stopSilenceDetection();
 
         this.isRecording = false;
-        this.isProcessing = true;
-        console.log(
-          "[AudioManager] Calling onStateChange with isProcessing=true",
-        );
-        this.onStateChange?.({ isRecording: false, isProcessing: true });
+
+        // Skip transcription if silence detection was enabled and no speech was detected
+        if (silenceDetectionWasEnabled && !speechWasDetected) {
+          console.log(
+            "[AudioManager] No speech detected - skipping transcription",
+          );
+          this.isProcessing = false;
+          this.onStateChange?.({ isRecording: false, isProcessing: false });
+          // Clean up stream
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
 
         const audioBlob = new Blob(this.audioChunks, { type: "audio/wav" });
         console.log("[AudioManager] audioBlob created, size:", audioBlob.size);
 
         if (audioBlob.size === 0) {
           console.log("[AudioManager] WARNING: audioBlob is empty!");
+          this.isProcessing = false;
+          this.onStateChange?.({ isRecording: false, isProcessing: false });
+          stream.getTracks().forEach((track) => track.stop());
+          return;
         }
+
+        // Analyze audio for silence before transcription
+        const hasAudio = await this.analyzeAudioForSpeech(audioBlob);
+        if (!hasAudio) {
+          console.log(
+            "[AudioManager] Audio is silent - skipping transcription",
+          );
+          this.isProcessing = false;
+          this.onStateChange?.({ isRecording: false, isProcessing: false });
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        this.isProcessing = true;
+        console.log(
+          "[AudioManager] Calling onStateChange with isProcessing=true",
+        );
+        this.onStateChange?.({ isRecording: false, isProcessing: true });
 
         const durationSeconds = this.recordingStartTime
           ? (Date.now() - this.recordingStartTime) / 1000
@@ -349,13 +615,43 @@ class AudioManager {
   stopRecording() {
     // Always clean up silence detection regardless of recording state
     // This prevents memory leaks if called when not recording
-    this.stopSilenceDetection();
+    // Fire-and-forget: don't await to avoid cascading async changes
+    this.stopSilenceDetection().catch(() => {});
 
     if (this.mediaRecorder && this.isRecording) {
       this.mediaRecorder.stop();
       // State change will be handled in onstop callback
       return true;
     }
+    return false;
+  }
+
+  // Cancel recording without processing - used for Escape key abort
+  cancelRecording() {
+    console.log("[AudioManager] cancelRecording called");
+
+    // Set flag to skip processing in onstop callback
+    this._cancelledRecording = true;
+
+    // Stop silence detection (fire-and-forget)
+    this.stopSilenceDetection().catch(() => {});
+
+    if (this.mediaRecorder && this.isRecording) {
+      // Stop the media recorder - onstop will check _cancelledRecording flag
+      this.mediaRecorder.stop();
+      return true;
+    }
+
+    // If processing, just reset state (can't cancel in-flight API call)
+    if (this.isProcessing) {
+      console.log(
+        "[AudioManager] Cancelling during processing - resetting state",
+      );
+      this.isProcessing = false;
+      this.onStateChange?.({ isRecording: false, isProcessing: false });
+      return true;
+    }
+
     return false;
   }
 
@@ -415,10 +711,20 @@ class AudioManager {
     try {
       const arrayBuffer = await audioBlob.arrayBuffer();
       const language = localStorage.getItem("preferredLanguage");
+      const translateToEnglish =
+        localStorage.getItem("translateToEnglish") === "true";
       const options = { model };
       if (language && language !== "auto") {
         options.language = language;
       }
+      // Set task: "translate" converts to English, "transcribe" keeps original language
+      options.task = translateToEnglish ? "translate" : "transcribe";
+      console.log("[AudioManager] Transcription options:", {
+        language,
+        translateToEnglish,
+        task: options.task,
+        model,
+      });
       console.log("[AudioManager] Calling transcribeLocalWhisper IPC...");
 
       const result = await window.electronAPI.transcribeLocalWhisper(
@@ -487,10 +793,8 @@ class AudioManager {
   }
 
   async getAPIKey() {
-    if (this.cachedApiKey) {
-      return this.cachedApiKey;
-    }
-
+    // Security: Don't cache API keys in renderer process memory
+    // Fetch fresh each time from main process
     let apiKey = await window.electronAPI.getOpenAIKey();
     if (
       !apiKey ||
@@ -510,7 +814,6 @@ class AudioManager {
       );
     }
 
-    this.cachedApiKey = apiKey;
     return apiKey;
   }
 
@@ -520,6 +823,12 @@ class AudioManager {
         window.AudioContext || window.webkitAudioContext
       )();
       const reader = new FileReader();
+
+      // Helper to close AudioContext and resolve (prevents memory leak)
+      const closeAndResolve = (result) => {
+        audioContext.close().catch(() => {});
+        resolve(result);
+      };
 
       reader.onload = async () => {
         try {
@@ -543,14 +852,14 @@ class AudioManager {
 
           const renderedBuffer = await offlineContext.startRendering();
           const wavBlob = this.audioBufferToWav(renderedBuffer);
-          resolve(wavBlob);
+          closeAndResolve(wavBlob);
         } catch (error) {
           // If optimization fails, use original
-          resolve(audioBlob);
+          closeAndResolve(audioBlob);
         }
       };
 
-      reader.onerror = () => resolve(audioBlob);
+      reader.onerror = () => closeAndResolve(audioBlob);
       reader.readAsArrayBuffer(audioBlob);
     });
   }
@@ -892,10 +1201,13 @@ class AudioManager {
       if (allowLocalFallback && isOpenAIMode) {
         try {
           const arrayBuffer = await audioBlob.arrayBuffer();
+          const translateToEnglish =
+            localStorage.getItem("translateToEnglish") === "true";
           const options = { model: fallbackModel };
           if (language && language !== "auto") {
             options.language = language;
           }
+          options.task = translateToEnglish ? "translate" : "transcribe";
 
           const result = await window.electronAPI.transcribeLocalWhisper(
             arrayBuffer,
@@ -999,8 +1311,8 @@ class AudioManager {
   }
 
   cleanup() {
-    // Stop silence detection first
-    this.stopSilenceDetection();
+    // Stop silence detection first (fire-and-forget)
+    this.stopSilenceDetection().catch(() => {});
 
     if (this.mediaRecorder && this.isRecording) {
       this.stopRecording();

@@ -37,11 +37,24 @@ export const useAudioRecording = (toast, options = {}) => {
         setIsProcessing(isProcessing);
 
         // Show overlay when recording starts, hide when done
-        if (isRecording || isProcessing) {
+        // Only show if hideIndicatorWindow is not enabled
+        const hideIndicator =
+          localStorage.getItem("hideIndicatorWindow") === "true";
+        if ((isRecording || isProcessing) && !hideIndicator) {
           window.electronAPI?.showDictationPanel?.();
         }
       },
       onError: (error) => {
+        // Play error sound if enabled
+        const audioFeedbackEnabled =
+          localStorage.getItem("audioFeedbackEnabled") === "true";
+        if (audioFeedbackEnabled) {
+          const sound = localStorage.getItem("soundOnError") || "none";
+          if (sound !== "none") {
+            window.electronAPI?.playAudioFeedback?.(sound);
+          }
+        }
+
         toastRef.current?.({
           title: error.title,
           description: error.description,
@@ -51,6 +64,16 @@ export const useAudioRecording = (toast, options = {}) => {
       onTranscriptionComplete: async (result) => {
         if (result.success) {
           setTranscript(result.text);
+
+          // Play success sound if enabled
+          const audioFeedbackEnabled =
+            localStorage.getItem("audioFeedbackEnabled") === "true";
+          if (audioFeedbackEnabled) {
+            const sound = localStorage.getItem("soundOnSuccess") || "done";
+            if (sound !== "none") {
+              window.electronAPI?.playAudioFeedback?.(sound);
+            }
+          }
 
           // Paste immediately
           await audioManagerRef.current.safePaste(result.text);
@@ -155,6 +178,13 @@ export const useAudioRecording = (toast, options = {}) => {
     }
   };
 
+  const cancelRecording = () => {
+    if (audioManagerRef.current) {
+      return audioManagerRef.current.cancelRecording();
+    }
+    return false;
+  };
+
   return {
     isRecording,
     isProcessing,
@@ -162,5 +192,6 @@ export const useAudioRecording = (toast, options = {}) => {
     startRecording,
     stopRecording,
     toggleListening,
+    cancelRecording,
   };
 };

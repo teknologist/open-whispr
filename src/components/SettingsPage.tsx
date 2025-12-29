@@ -9,12 +9,18 @@ import {
   Mic,
   Shield,
   Volume2,
+  AlertTriangle,
 } from "lucide-react";
 import WhisperModelPicker from "./WhisperModelPicker";
 import ProcessingModeSelector from "./ui/ProcessingModeSelector";
 import ApiKeyInput from "./ui/ApiKeyInput";
 import { ConfirmDialog, AlertDialog } from "./ui/dialog";
-import { useSettings } from "../hooks/useSettings";
+import {
+  useSettings,
+  useFeedbackSettings,
+  SOUND_OPTIONS,
+  type AudioFeedbackSound,
+} from "../hooks/useSettings";
 import { useDialogs } from "../hooks/useDialogs";
 import { useAgentName } from "../utils/agentName";
 import { useWhisper } from "../hooks/useWhisper";
@@ -61,6 +67,7 @@ export default function SettingsPage({
     allowLocalFallback,
     fallbackWhisperModel,
     preferredLanguage,
+    translateToEnglish,
     cloudTranscriptionBaseUrl,
     cloudReasoningBaseUrl,
     useReasoningModel,
@@ -78,6 +85,7 @@ export default function SettingsPage({
     setAllowLocalFallback,
     setFallbackWhisperModel,
     setPreferredLanguage,
+    setTranslateToEnglish,
     setCloudTranscriptionBaseUrl,
     setCloudReasoningBaseUrl,
     setUseReasoningModel,
@@ -134,6 +142,22 @@ export default function SettingsPage({
   const permissionsHook = usePermissions(showAlertDialog);
   const { pasteFromClipboardWithFallback } = useClipboard(showAlertDialog);
   const { agentName, setAgentName } = useAgentName();
+  const {
+    showTrayIcon,
+    setShowTrayIcon,
+    hideIndicatorWindow,
+    setHideIndicatorWindow,
+    audioFeedbackEnabled,
+    setAudioFeedbackEnabled,
+    soundOnRecordStart,
+    setSoundOnRecordStart,
+    soundOnRecordStop,
+    setSoundOnRecordStop,
+    soundOnSuccess,
+    setSoundOnSuccess,
+    soundOnError,
+    setSoundOnError,
+  } = useFeedbackSettings();
   const installTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const subscribeToUpdates = useCallback(() => {
@@ -876,15 +900,13 @@ export default function SettingsPage({
                     <span className="text-blue-600 text-xl">🔧</span>
                     <div>
                       <h4 className="font-medium text-blue-800 mb-2">
-                        ydotool Setup Required for Text Input
+                        wtype Required for Text Input
                       </h4>
                       <p className="text-sm text-blue-700 mb-3">
                         On Wayland, OpenWhispr uses{" "}
-                        <code className="bg-blue-100 px-1 rounded">
-                          ydotool
-                        </code>{" "}
-                        to type text directly into applications. This requires
-                        the ydotool daemon to be running.
+                        <code className="bg-blue-100 px-1 rounded">wtype</code>{" "}
+                        to type text directly into applications. It supports
+                        UTF-8 text including accents and emojis.
                       </p>
                       <div className="bg-white rounded p-3 space-y-2">
                         <p className="text-sm font-medium text-blue-900">
@@ -892,23 +914,14 @@ export default function SettingsPage({
                         </p>
                         <code className="block bg-gray-100 rounded px-3 py-2 text-xs font-mono">
                           # Fedora/RHEL
-                          {"\n"}sudo dnf install ydotool
+                          {"\n"}sudo dnf install wtype
                           {"\n\n"}# Arch Linux
-                          {"\n"}sudo pacman -S ydotool
+                          {"\n"}sudo pacman -S wtype
                           {"\n\n"}# Ubuntu/Debian
-                          {"\n"}sudo apt install ydotool
-                        </code>
-                        <p className="text-sm font-medium text-blue-900 mt-3">
-                          Enable the daemon:
-                        </p>
-                        <code className="block bg-gray-100 rounded px-3 py-2 text-xs font-mono">
-                          sudo systemctl enable --now ydotool
-                          {"\n"}# Or add your user to the input group:
-                          {"\n"}sudo usermod -aG input $USER
+                          {"\n"}sudo apt install wtype
                         </code>
                         <p className="text-xs text-blue-600 mt-2">
-                          After installation, log out and back in for group
-                          changes to take effect.
+                          No daemon or special permissions required!
                         </p>
                       </div>
                     </div>
@@ -935,7 +948,7 @@ export default function SettingsPage({
                   {permissionsHook.isTestingAccessibility
                     ? "Testing..."
                     : isWayland
-                      ? "Test Text Input (ydotool)"
+                      ? "Test Text Input (wtype)"
                       : "Test Accessibility Permission"}
                 </Button>
                 {!isWayland && (
@@ -1049,6 +1062,133 @@ export default function SettingsPage({
                   <span className="mr-2">🗑️</span>
                   Clean Up All App Data
                 </Button>
+              </div>
+
+              {/* Recording Feedback Section */}
+              <div className="space-y-4 mt-6 p-4 bg-indigo-50 border border-indigo-200 rounded-xl">
+                <h4 className="font-medium text-indigo-900 flex items-center gap-2">
+                  <Volume2 className="h-4 w-4" />
+                  Recording Feedback
+                </h4>
+                <p className="text-sm text-indigo-800">
+                  Configure visual and audio feedback during recording.
+                </p>
+
+                {/* Show tray icon toggle */}
+                <div className="flex items-center justify-between py-2">
+                  <div>
+                    <span className="text-sm font-medium text-gray-700">
+                      Show system tray icon
+                    </span>
+                    <p className="text-xs text-gray-500">
+                      Display OpenWhispr icon in system tray
+                    </p>
+                  </div>
+                  <Toggle
+                    checked={showTrayIcon}
+                    onChange={(checked) => {
+                      setShowTrayIcon(checked);
+                      window.electronAPI?.setTrayEnabled?.(checked);
+                    }}
+                  />
+                </div>
+
+                {/* Hide indicator window toggle */}
+                <div className="flex items-center justify-between py-2 border-t border-indigo-200">
+                  <div>
+                    <span className="text-sm font-medium text-gray-700">
+                      Hide indicator window
+                    </span>
+                    <p className="text-xs text-gray-500">
+                      Don't show overlay when recording (useful on Wayland)
+                    </p>
+                  </div>
+                  <Toggle
+                    checked={hideIndicatorWindow}
+                    onChange={(checked) => {
+                      setHideIndicatorWindow(checked);
+                      window.electronAPI?.setHideIndicatorWindow?.(checked);
+                    }}
+                  />
+                </div>
+
+                {/* Audio feedback toggle */}
+                <div className="flex items-center justify-between py-2 border-t border-indigo-200">
+                  <div>
+                    <span className="text-sm font-medium text-gray-700">
+                      Audio feedback
+                    </span>
+                    <p className="text-xs text-gray-500">
+                      Play sound when recording starts/stops
+                    </p>
+                  </div>
+                  <Toggle
+                    checked={audioFeedbackEnabled}
+                    onChange={setAudioFeedbackEnabled}
+                  />
+                </div>
+
+                {/* Per-event sound selection */}
+                {audioFeedbackEnabled && (
+                  <div className="space-y-2 pt-2 border-t border-indigo-200">
+                    {[
+                      {
+                        label: "Record start",
+                        value: soundOnRecordStart,
+                        setter: setSoundOnRecordStart,
+                      },
+                      {
+                        label: "Record stop",
+                        value: soundOnRecordStop,
+                        setter: setSoundOnRecordStop,
+                      },
+                      {
+                        label: "Success",
+                        value: soundOnSuccess,
+                        setter: setSoundOnSuccess,
+                      },
+                      {
+                        label: "Error",
+                        value: soundOnError,
+                        setter: setSoundOnError,
+                      },
+                    ].map(({ label, value, setter }) => (
+                      <div
+                        key={label}
+                        className="flex items-center justify-between py-1"
+                      >
+                        <span className="text-sm text-gray-600">{label}</span>
+                        <div className="flex items-center gap-1">
+                          <select
+                            value={value}
+                            onChange={(e) =>
+                              setter(e.target.value as AudioFeedbackSound)
+                            }
+                            className="px-2 py-1 text-xs border border-gray-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                          >
+                            {SOUND_OPTIONS.map((opt) => (
+                              <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                              </option>
+                            ))}
+                          </select>
+                          {value !== "none" && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                window.electronAPI?.playAudioFeedback?.(value)
+                              }
+                              className="p-1 text-gray-400 hover:text-indigo-600 transition-colors"
+                              title="Test sound"
+                            >
+                              <Volume2 size={14} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="space-y-3 mt-6 p-4 bg-rose-50 border border-rose-200 rounded-xl">
@@ -1177,6 +1317,43 @@ export default function SettingsPage({
                 }}
                 className="w-full"
               />
+              {/* Warning for English-only models */}
+              {useLocalWhisper &&
+                (whisperModel === "distil-small.en" ||
+                  whisperModel === "distil-medium.en") &&
+                preferredLanguage !== "en" &&
+                preferredLanguage !== "auto" && (
+                  <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                    <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                    <p className="text-sm text-amber-800">
+                      <strong>{whisperModel}</strong> only supports English.
+                      Select a multilingual model (e.g., distil-large-v3, base)
+                      for {preferredLanguage.toUpperCase()} transcription.
+                    </p>
+                  </div>
+                )}
+
+              {/* Translate to English toggle */}
+              <div className="flex items-center justify-between pt-3 border-t border-gray-200">
+                <div>
+                  <h5 className="font-medium text-gray-900">
+                    Translate to English
+                  </h5>
+                  <p className="text-sm text-gray-600">
+                    Translate speech to English instead of keeping the original
+                    language
+                  </p>
+                </div>
+                <Toggle
+                  checked={translateToEnglish}
+                  onChange={(checked) => {
+                    setTranslateToEnglish(checked);
+                    updateTranscriptionSettings({
+                      translateToEnglish: checked,
+                    });
+                  }}
+                />
+              </div>
             </div>
 
             {/* Silence Auto-Stop */}

@@ -1,6 +1,51 @@
 const { ipcMain, app, shell, BrowserWindow } = require("electron");
+const { spawn } = require("child_process");
+const path = require("path");
+const fs = require("fs");
 const AppUtils = require("../utils");
 const debugLogger = require("./debugLogger");
+
+// Simple rate limiter to prevent IPC spam
+class RateLimiter {
+  constructor() {
+    this.operations = new Map(); // operation -> { inProgress: boolean, lastCall: number }
+  }
+
+  // Check if operation is allowed (not in progress and not called too recently)
+  canProceed(operation, minIntervalMs = 500) {
+    const state = this.operations.get(operation) || {
+      inProgress: false,
+      lastCall: 0,
+    };
+    const now = Date.now();
+
+    if (state.inProgress) {
+      return { allowed: false, reason: "Operation already in progress" };
+    }
+
+    if (now - state.lastCall < minIntervalMs) {
+      return { allowed: false, reason: "Rate limited - please wait" };
+    }
+
+    return { allowed: true };
+  }
+
+  // Mark operation as started
+  start(operation) {
+    this.operations.set(operation, {
+      inProgress: true,
+      lastCall: Date.now(),
+    });
+  }
+
+  // Mark operation as completed
+  complete(operation) {
+    const state = this.operations.get(operation);
+    if (state) {
+      state.inProgress = false;
+    }
+  }
+}
 
 class IPCHandlers {
   constructor(managers) {
@@ -10,6 +55,8 @@ class IPCHandlers {
     this.whisperManager = managers.whisperManager;
     this.windowManager = managers.windowManager;
     this.modelManager = managers.modelManager;
+    this.trayManager = managers.trayManager;
+    this.rateLimiter = new RateLimiter();
     this.setupHandlers();
   }
 
@@ -60,6 +107,180 @@ class IPCHandlers {
     ipcMain.handle("set-main-window-interactivity", (event, shouldCapture) => {
       this.windowManager.setMainWindowInteractivity(Boolean(shouldCapture));
       return { success: true };
+    });
+
+    // Feedback settings handlers
+    ipcMain.handle("set-hide-indicator-window", (event, hide) => {
+      this.windowManager.setHideIndicatorWindow(Boolean(hide));
+      return { success: true };
+    });
+
+    ipcMain.handle("set-tray-enabled", async (event, enabled) => {
+      try {
+        if (enabled) {
+          await this.trayManager?.createTray();
+        } else {
+          this.trayManager?.destroyTray();
+        }
+        return { success: true };
+      } catch (error) {
+        console.error("Failed to toggle tray:", error);
+        return { success: false, error: error.message };
+      }
+    });
+
+    ipcMain.handle("set-recording-state", (event, isRecording) => {
+      console.log("[IPC] set-recording-state called:", isRecording);
+      this.trayManager?.setRecordingState(Boolean(isRecording));
+      return { success: true };
+    });
+
+    ipcMain.handle("play-audio-feedback", async (event, sound) => {
+      console.log("[IPC] play-audio-feedback called:", sound);
+      try {
+        // Handle "none" - no sound
+        if (sound === "none") {
+          return { success: true };
+        }
+
+        if (sound === "beep") {
+          console.log("[IPC] Playing system beep");
+          shell.beep();
+          return { success: true };
+        }
+
+        // Play custom sound file
+        // Security: Validate sound name to prevent path injection
+        const validSounds = [
+          "bubble",
+          "tap",
+          "ping",
+          "whoosh",
+          "done",
+          "muted-alert",
+          "chime",
+          "click",
+        ];
+        if (!validSounds.includes(sound)) {
+          console.warn(
+            `[IPC] Invalid sound name: ${sound}, falling back to beep`,
+          );
+          shell.beep();
+          return { success: true, fallback: true };
+        }
+
+        const soundFile = `${sound}.ogg`;
+        console.log("[IPC] Looking for sound file:", soundFile);
+        const isDevelopment = process.env.NODE_ENV === "development";
+
+        // Define paths in order of preference
+        const candidatePaths = isDevelopment
+          ? [path.join(__dirname, "..", "assets", "sounds", soundFile)]
+          : [
+              // Most likely production paths first
+              path.join(process.resourcesPath, "assets", "sounds", soundFile),
+              path.join(
+                process.resourcesPath,
+                "src",
+                "assets",
+                "sounds",
+                soundFile,
+              ),
+              path.join(app.getAppPath(), "src", "assets", "sounds", soundFile),
+            ];
+
+        let soundPath = null;
+        for (const p of candidatePaths) {
+          if (fs.existsSync(p)) {
+            soundPath = p;
+            break;
+          }
+        }
+
+        if (!soundPath) {
+          console.warn(
+            `Sound file not found: ${soundFile}, falling back to beep`,
+          );
+          shell.beep();
+          return { success: true, fallback: true };
+        }
+
+        // Play sound using platform-specific command
+        const playSound = (cmd, args) => {
+          try {
+            const child = spawn(cmd, args, {
+              detached: true,
+              stdio: "ignore",
+            });
+            child.on("error", () => {
+              // Silently ignore spawn errors
+            });
+            child.unref();
+            return true;
+          } catch {
+            return false;
+          }
+        };
+
+        if (process.platform === "linux") {
+          // Try paplay (PulseAudio/PipeWire) first, then aplay (ALSA)
+          const players = ["paplay", "aplay", "play"];
+          for (const player of players) {
+            if (playSound(player, [soundPath])) {
+              return { success: true };
+            }
+          }
+          shell.beep();
+          return { success: true, fallback: true };
+        } else if (process.platform === "darwin") {
+          if (playSound("afplay", [soundPath])) {
+            return { success: true };
+          }
+          shell.beep();
+          return { success: true, fallback: true };
+        } else if (process.platform === "win32") {
+          // Security: Validate soundPath is one of the expected candidate paths
+          // and doesn't contain dangerous characters for PowerShell
+          if (!candidatePaths.includes(soundPath)) {
+            console.warn(
+              "[IPC] Sound path not in candidate paths, falling back to beep",
+            );
+            shell.beep();
+            return { success: true, fallback: true };
+          }
+
+          // Reject paths with newlines, backticks, or null bytes that could escape PowerShell
+          if (/[\r\n`\0]/.test(soundPath)) {
+            console.warn(
+              "[IPC] Sound path contains dangerous characters, falling back to beep",
+            );
+            shell.beep();
+            return { success: true, fallback: true };
+          }
+
+          // Escape single quotes in the path by doubling them for PowerShell
+          const escapedPath = soundPath.replace(/'/g, "''");
+          if (
+            playSound("powershell", [
+              "-NoProfile",
+              "-NonInteractive",
+              "-Command",
+              `Add-Type -AssemblyName presentationCore; $player = New-Object System.Windows.Media.MediaPlayer; $player.Open([Uri]'${escapedPath}'); $player.Play(); Start-Sleep -Milliseconds 2000`,
+            ])
+          ) {
+            return { success: true };
+          }
+          shell.beep();
+          return { success: true, fallback: true };
+        }
+
+        shell.beep();
+        return { success: true, fallback: true };
+      } catch (error) {
+        console.error("Failed to play audio feedback:", error);
+        shell.beep();
+        return { success: false, error: error.message, fallback: true };
+      }
     });
 
     // Environment handlers
@@ -141,6 +362,13 @@ class IPCHandlers {
     ipcMain.handle(
       "transcribe-local-whisper",
       async (event, audioBlob, options = {}) => {
+        // Rate limiting for expensive transcription operations
+        const check = this.rateLimiter.canProceed("transcribe", 300);
+        if (!check.allowed) {
+          return { success: false, error: check.reason };
+        }
+        this.rateLimiter.start("transcribe");
+
         debugLogger.log("transcribe-local-whisper called", {
           audioBlobType: typeof audioBlob,
           audioBlobSize: audioBlob?.byteLength || audioBlob?.length || 0,
@@ -170,6 +398,8 @@ class IPCHandlers {
         } catch (error) {
           debugLogger.error("Local Whisper transcription error", error);
           throw error;
+        } finally {
+          this.rateLimiter.complete("transcribe");
         }
       },
     );
@@ -275,6 +505,47 @@ class IPCHandlers {
 
     ipcMain.handle("check-ffmpeg-availability", async (event) => {
       return this.whisperManager.checkFFmpegAvailability();
+    });
+
+    // Whisper server management handlers
+    ipcMain.handle("whisper-server-start", async (event, modelName) => {
+      // Rate limiting for server operations
+      const check = this.rateLimiter.canProceed("whisper-server", 2000);
+      if (!check.allowed) {
+        return { success: false, error: check.reason };
+      }
+      this.rateLimiter.start("whisper-server");
+
+      try {
+        return await this.whisperManager.startServer(modelName);
+      } catch (error) {
+        return { success: false, error: error.message };
+      } finally {
+        this.rateLimiter.complete("whisper-server");
+      }
+    });
+
+    ipcMain.handle("whisper-server-stop", async (event) => {
+      try {
+        return await this.whisperManager.stopServer();
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    });
+
+    ipcMain.handle("whisper-server-status", async (event) => {
+      return {
+        running: this.whisperManager.isServerRunning(),
+        model: this.whisperManager.getServerModel(),
+      };
+    });
+
+    ipcMain.handle("whisper-server-reload", async (event, modelName) => {
+      try {
+        return await this.whisperManager.reloadServerModel(modelName);
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
     });
 
     // Utility handlers

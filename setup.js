@@ -46,5 +46,5 @@ Note: Make sure you have the necessary system permissions for:
 
 For local Whisper processing, you'll also need:
 - Python 3 (install via Homebrew: brew install python3)
-- OpenAI Whisper (install via: pip3 install openai-whisper)
+- Faster-Whisper (install via: pip3 install faster-whisper)
 `);

@@ -176,12 +176,9 @@ sudo dnf install wtype
 
 # Arch
 sudo pacman -S wtype
-
-# Alternative: ydotool (requires uinput permissions)
-sudo apt install ydotool  # or equivalent for your distro
 ```
 
-> ℹ️ **Note**: OpenWhispr automatically detects your display server (X11 vs Wayland) and uses the appropriate paste tool. If no paste tool is installed, text will still be copied to the clipboard - you'll just need to paste manually with Ctrl+V.
+> ℹ️ **Note**: wtype is required on Wayland for automatic pasting and supports UTF-8 text (accents, emojis). On X11, xdotool is used. If no paste tool is installed, text will still be copied to the clipboard - you'll just need to paste manually.
 
 > 🔒 **Flatpak Security**: The Flatpak package includes sandboxing with explicit permissions for microphone, clipboard, and file access. See [electron-builder.json](electron-builder.json) for the complete permission list.
 
@@ -424,6 +421,119 @@ For local processing, OpenWhispr offers automated setup:
 **Requirements**:
 - Sufficient disk space for models (39MB - 1.5GB depending on model)
 - Admin/sudo access may be required for Python installation
+
+### GPU Acceleration (NVIDIA CUDA)
+
+For significantly faster local transcription, OpenWhispr supports NVIDIA GPU acceleration via CUDA. This can speed up transcription by 5-10x compared to CPU.
+
+**Requirements**:
+- NVIDIA GPU with CUDA Compute Capability 6.0+ (GTX 10-series or newer)
+- NVIDIA Driver 525+ (for CUDA 12.x support)
+- 2GB+ VRAM (4GB+ recommended for larger models)
+
+**Step 1: Install CUDA Toolkit**
+
+```bash
+# Ubuntu/Debian
+sudo apt install nvidia-cuda-toolkit
+
+# Fedora
+sudo dnf install cuda
+
+# Arch Linux
+sudo pacman -S cuda
+
+# Or download from NVIDIA: https://developer.nvidia.com/cuda-downloads
+```
+
+**Step 2: Install cuDNN (CUDA Deep Neural Network library)**
+
+cuDNN is required for GPU inference with faster-whisper/CTranslate2:
+
+```bash
+# Ubuntu/Debian (recommended - installs cuDNN 9.x)
+sudo apt install libcudnn9-cuda-12 libcudnn9-dev-cuda-12
+
+# Or for cuDNN 8.x (older systems)
+sudo apt install libcudnn8 libcudnn8-dev
+
+# Fedora
+sudo dnf install cudnn
+
+# Arch Linux
+sudo pacman -S cudnn
+
+# Alternative: Install via pip (adds cuDNN to Python environment)
+pip install nvidia-cudnn-cu12
+# or with uv:
+uv pip install nvidia-cudnn-cu12
+```
+
+**Step 3: Install PyTorch with CUDA Support**
+
+The default PyTorch installation is CPU-only. Install the CUDA version:
+
+```bash
+# Using pip (CUDA 12.4 - recommended for latest GPUs)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# Using uv (faster)
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# For CUDA 12.1 (more compatible)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# For CUDA 11.8 (older systems)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# Pre-release/nightly builds (latest features)
+uv pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124
+```
+
+**Step 4: Install faster-whisper with GPU support**
+
+```bash
+pip install faster-whisper
+# or with uv:
+uv pip install faster-whisper
+```
+
+**Verify GPU Setup**:
+
+```bash
+# Check CUDA availability
+python3 -c "import torch; print('CUDA:', torch.cuda.is_available(), '| GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
+
+# Check cuDNN availability
+python3 -c "import ctypes; ctypes.CDLL('libcudnn.so.9'); print('cuDNN: OK')"
+
+# Expected output:
+# CUDA: True | GPU: NVIDIA GeForce RTX 5090
+# cuDNN: OK
+```
+
+**Troubleshooting GPU Issues**:
+
+| Issue | Solution |
+|-------|----------|
+| `CUDA not available` | Install NVIDIA drivers and CUDA toolkit |
+| `cuDNN not found` | Install libcudnn packages or `pip install nvidia-cudnn-cu12` |
+| `Out of memory` | Use a smaller model (base instead of large-v3) |
+| `Slow GPU inference` | Ensure cuDNN is installed (required for CTranslate2 optimization) |
+
+**GPU Memory Usage by Model**:
+
+| Model | VRAM Usage | Speed (RTX 3080) |
+|-------|-----------|------------------|
+| tiny | ~1 GB | ~30x realtime |
+| base | ~1.5 GB | ~25x realtime |
+| small | ~2.5 GB | ~15x realtime |
+| medium | ~5 GB | ~8x realtime |
+| large-v3 | ~10 GB | ~5x realtime |
+| turbo | ~6 GB | ~12x realtime |
+| distil-large-v3 | ~4 GB | ~20x realtime |
+
+> **Note**: OpenWhispr automatically detects GPU availability and uses it when possible. If GPU inference fails, it falls back to CPU. The model is preloaded into GPU memory at app startup for instant transcription.
 
 ### Customization
 

@@ -200,6 +200,23 @@ declare global {
         error?: string;
       }>;
 
+      // Whisper server management (GPU model preloading)
+      whisperServerStart: (
+        modelName: string,
+      ) => Promise<{ success: boolean; model?: string; error?: string }>;
+      whisperServerStop: () => Promise<{
+        success: boolean;
+        message?: string;
+        error?: string;
+      }>;
+      whisperServerStatus: () => Promise<{
+        running: boolean;
+        model: string | null;
+      }>;
+      whisperServerReload: (
+        modelName: string,
+      ) => Promise<{ success: boolean; model?: string; error?: string }>;
+
       // Local AI model management
       modelGetAll: () => Promise<any[]>;
       modelCheck: (modelId: string) => Promise<boolean>;
@@ -248,6 +265,28 @@ declare global {
       startWindowDrag: () => Promise<void>;
       stopWindowDrag: () => Promise<void>;
       setMainWindowInteractivity: (interactive: boolean) => Promise<void>;
+
+      // Feedback settings
+      setHideIndicatorWindow: (hide: boolean) => Promise<{ success: boolean }>;
+      setTrayEnabled: (
+        enabled: boolean,
+      ) => Promise<{ success: boolean; error?: string }>;
+      setRecordingState: (
+        isRecording: boolean,
+      ) => Promise<{ success: boolean }>;
+      playAudioFeedback: (
+        sound:
+          | "none"
+          | "beep"
+          | "bubble"
+          | "tap"
+          | "ping"
+          | "whoosh"
+          | "done"
+          | "muted-alert"
+          | "chime"
+          | "click",
+      ) => Promise<{ success: boolean; fallback?: boolean; error?: string }>;
 
       // App management
       cleanupApp: () => Promise<{ success: boolean; message: string }>;

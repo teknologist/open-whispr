@@ -155,6 +155,7 @@ const ipcHandlers = new IPCHandlers({
   clipboardManager,
   whisperManager,
   windowManager,
+  trayManager,
 });
 
 // Main application startup
@@ -320,4 +321,8 @@ app.on("will-quit", () => {
   globalShortcut.unregisterAll();
   globeKeyManager.stop();
   updateManager.cleanup();
+  // Stop Whisper server gracefully
+  whisperManager.stopServer().catch((err) => {
+    console.error("[main] Error stopping Whisper server:", err);
+  });
 });
