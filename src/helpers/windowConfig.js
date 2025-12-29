@@ -1,9 +1,15 @@
 const path = require("path");
 
+// Window dimension constants
+const DICTATION_WINDOW_WIDTH = 96; // Compact size for floating mic button
+const DICTATION_WINDOW_HEIGHT = 72; // Minimal height for recording indicator
+const CONTROL_PANEL_WIDTH = 1200; // Default width for settings/control panel
+const CONTROL_PANEL_HEIGHT = 800; // Default height for settings/control panel
+
 // Main dictation window configuration
 const MAIN_WINDOW_CONFIG = {
-  width: 240,
-  height: 240,
+  width: DICTATION_WINDOW_WIDTH,
+  height: DICTATION_WINDOW_HEIGHT,
   webPreferences: {
     preload: path.join(__dirname, "..", "..", "preload.js"),
     nodeIntegration: false,
@@ -14,26 +20,34 @@ const MAIN_WINDOW_CONFIG = {
   frame: false,
   alwaysOnTop: true,
   resizable: false,
-  transparent: true,
-  show: false, // Start hidden, show after setup
-  skipTaskbar: false, // Keep visible in Dock/taskbar so app stays discoverable
+  transparent: false, // Opaque window for better compatibility
+  show: false, // Start hidden, show when recording
+  skipTaskbar: true, // Hide from taskbar since it's just a small indicator
   focusable: true,
   visibleOnAllWorkspaces: true,
   fullScreenable: false,
-  hasShadow: false, // Remove shadow for cleaner look
-  acceptsFirstMouse: true, // Accept clicks even when not focused
-  type: process.platform === 'darwin' ? 'panel' : 'normal', // Panel on macOS preserves floating behavior
+  hasShadow: true,
+  acceptsFirstMouse: true,
+  roundedCorners: true,
+  backgroundColor: "#1a1a1a", // Dark background
+  type: process.platform === "darwin" ? "panel" : "normal",
 };
 
 // Control panel window configuration
 const CONTROL_PANEL_CONFIG = {
-  width: 1200,
-  height: 800,
+  width: CONTROL_PANEL_WIDTH,
+  height: CONTROL_PANEL_HEIGHT,
   webPreferences: {
     preload: path.join(__dirname, "..", "..", "preload.js"),
     nodeIntegration: false,
     contextIsolation: true,
     enableRemoteModule: false,
+    // SECURITY NOTE: sandbox is disabled to allow IPC communication with main process
+    // for model downloads, file system operations, and clipboard access.
+    // All sensitive operations are still mediated through the preload script's contextBridge.
+    // webSecurity is disabled to allow loading local model files and CORS-free API calls.
+    // This is acceptable because: 1) No remote/untrusted content is loaded, 2) All APIs
+    // are accessed through the secure preload bridge, 3) The app doesn't load external URLs.
     sandbox: false,
     webSecurity: false,
     spellcheck: false,
@@ -53,7 +67,7 @@ const CONTROL_PANEL_CONFIG = {
   skipTaskbar: false, // Ensure control panel stays in taskbar
   alwaysOnTop: false, // Control panel should not be always on top
   visibleOnAllWorkspaces: false, // Control panel should stay in its workspace
-  type: 'normal', // Ensure it's a normal window, not a panel
+  type: "normal", // Ensure it's a normal window, not a panel
 };
 
 // Window positioning utilities
@@ -63,18 +77,15 @@ class WindowPositionUtil {
     const MARGIN = 20;
     const x = Math.max(
       0,
-      display.bounds.x + display.workArea.width - width - MARGIN
+      display.bounds.x + display.workArea.width - width - MARGIN,
     );
     const workArea = display.workArea || display.bounds;
-    const y = Math.max(
-      0,
-      workArea.y + workArea.height - height - MARGIN
-    );
+    const y = Math.max(0, workArea.y + workArea.height - height - MARGIN);
     return { x, y, width, height };
   }
 
   static setupAlwaysOnTop(window) {
-    if (process.platform === 'darwin') {
+    if (process.platform === "darwin") {
       // macOS: Use panel level for proper floating behavior
       // This ensures the window stays on top across spaces and fullscreen apps
       window.setAlwaysOnTop(true, "floating", 1);
@@ -83,12 +94,12 @@ class WindowPositionUtil {
         skipTransformProcessType: true, // Keep Dock/Command-Tab behaviour
       });
       window.setFullScreenable(false);
-      
+
       // Ensure window level is maintained
       if (window.isVisible()) {
         window.setAlwaysOnTop(true, "floating", 1);
       }
-    } else if (process.platform === 'win32') {
+    } else if (process.platform === "win32") {
       // Windows-specific always-on-top
       window.setAlwaysOnTop(true, "screen-saver");
       // Don't skip taskbar on Windows to maintain visibility
@@ -96,13 +107,13 @@ class WindowPositionUtil {
       // Linux and other platforms
       window.setAlwaysOnTop(true, "screen-saver");
     }
-    
+
     // Bring window to front if visible
     if (window.isVisible()) {
       window.moveTop();
     }
   }
-  
+
   static setupControlPanel(window) {
     // Control panel should behave like a normal application window
     // This is only called once during window creation

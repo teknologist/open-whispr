@@ -8,8 +8,8 @@
         {
           "id": "qwen2.5-0.5b-instruct-q5_k_m",
           "name": "Qwen2.5 0.5B",
-          "size": "0.4GB",
-          "sizeBytes": 429496729,
+          "size": "0.5GB",
+          "sizeBytes": 522186592,
           "description": "Smallest model, fast but limited capabilities",
           "fileName": "qwen2.5-0.5b-instruct-q5_k_m.gguf",
           "quantization": "q5_k_m",
@@ -18,8 +18,8 @@
         {
           "id": "qwen2.5-1.5b-instruct-q5_k_m",
           "name": "Qwen2.5 1.5B",
-          "size": "1.3GB",
-          "sizeBytes": 1395864371,
+          "size": "1.2GB",
+          "sizeBytes": 1285494304,
           "description": "Small model, good for basic tasks",
           "fileName": "qwen2.5-1.5b-instruct-q5_k_m.gguf",
           "quantization": "q5_k_m",
@@ -29,7 +29,7 @@
           "id": "qwen2.5-3b-instruct-q5_k_m",
           "name": "Qwen2.5 3B",
           "size": "2.3GB",
-          "sizeBytes": 2469606195,
+          "sizeBytes": 2438740384,
           "description": "Balanced model for general use",
           "fileName": "qwen2.5-3b-instruct-q5_k_m.gguf",
           "quantization": "q5_k_m",
@@ -38,23 +38,119 @@
         {
           "id": "qwen2.5-7b-instruct-q4km",
           "name": "Qwen2.5 7B",
-          "size": "4.7GB",
-          "sizeBytes": 5046586241,
+          "size": "4.4GB",
+          "sizeBytes": 4683074240,
           "description": "Large model with high quality (Q4_K_M quantization)",
-          "fileName": "qwen2.5-7b-instruct-q4_k_m.gguf",
+          "fileName": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
           "quantization": "q4_k_m",
           "contextLength": 128000,
-          "recommended": true
+          "recommended": true,
+          "useBartowski": true
         },
         {
           "id": "qwen2.5-7b-instruct-q5_k_m",
           "name": "Qwen2.5 7B",
-          "size": "5.4GB", 
-          "sizeBytes": 5798205849,
+          "size": "5.1GB",
+          "sizeBytes": 5444831936,
           "description": "Large model, high quality reasoning (Q5_K_M quantization)",
-          "fileName": "qwen2.5-7b-instruct-q5_k_m.gguf",
+          "fileName": "Qwen2.5-7B-Instruct-Q5_K_M.gguf",
           "quantization": "q5_k_m",
-          "contextLength": 128000
+          "contextLength": 128000,
+          "useBartowski": true
+        }
+      ]
+    },
+    {
+      "id": "mistral",
+      "name": "Mistral AI",
+      "baseUrl": "https://huggingface.co",
+      "models": [
+        {
+          "id": "mistral-7b-instruct-v0.3-q4_k_m",
+          "name": "Mistral 7B Instruct v0.3",
+          "size": "4.1GB",
+          "sizeBytes": 4372812000,
+          "description": "Fast and efficient instruction model",
+          "fileName": "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+          "quantization": "q4_k_m",
+          "contextLength": 32768,
+          "recommended": true
+        },
+        {
+          "id": "mistral-7b-instruct-v0.3-q5_k_m",
+          "name": "Mistral 7B Instruct v0.3 (Q5)",
+          "size": "4.8GB",
+          "sizeBytes": 5136175328,
+          "description": "Higher quality instruction model",
+          "fileName": "Mistral-7B-Instruct-v0.3-Q5_K_M.gguf",
+          "quantization": "q5_k_m",
+          "contextLength": 32768
+        },
+        {
+          "id": "mistral-7b-v0.1-q4_k_m",
+          "name": "Mistral 7B v0.1",
+          "size": "4.1GB",
+          "sizeBytes": 4368438912,
+          "description": "Base model for general text",
+          "fileName": "mistral-7b-v0.1.Q4_K_M.gguf",
+          "quantization": "q4_k_m",
+          "contextLength": 32768
+        }
+      ]
+    },
+    {
+      "id": "llama",
+      "name": "Meta Llama",
+      "baseUrl": "https://huggingface.co",
+      "models": [
+        {
+          "id": "llama-3.2-1b-instruct-q4_k_m",
+          "name": "Llama 3.2 1B",
+          "size": "0.8GB",
+          "sizeBytes": 807694464,
+          "description": "Tiny model for edge devices",
+          "fileName": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+          "quantization": "q4_k_m",
+          "contextLength": 131072
+        },
+        {
+          "id": "llama-3.2-3b-instruct-q4_k_m",
+          "name": "Llama 3.2 3B",
+          "size": "1.9GB",
+          "sizeBytes": 2019377696,
+          "description": "Small but capable multilingual model",
+          "fileName": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+          "quantization": "q4_k_m",
+          "contextLength": 131072,
+          "recommended": true
+        },
+        {
+          "id": "llama-3.1-8b-instruct-q4_k_m",
+          "name": "Llama 3.1 8B",
+          "size": "4.6GB",
+          "sizeBytes": 4920739232,
+          "description": "Powerful model with great performance",
+          "fileName": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+          "quantization": "q4_k_m",
+          "contextLength": 131072
+        }
+      ]
+    },
+    {
+      "id": "openai-oss",
+      "name": "OpenAI OSS",
+      "baseUrl": "https://huggingface.co",
+      "models": [
+        {
+          "id": "gpt-oss-20b-q4_k_m",
+          "name": "GPT-OSS 20B",
+          "size": "10.9GB",
+          "sizeBytes": 11673418816,
+          "description": "OpenAI's open-source model for consumer hardware",
+          "fileName": "openai_gpt-oss-20b-Q4_K_M.gguf",
+          "quantization": "q4_k_m",
+          "contextLength": 128000,
+          "recommended": true
         }
       ]
     }

@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef } from "react";
 import AudioManager from "../helpers/audioManager";
 
+// Delay before hiding window after transcription completes (ms)
+// This provides visual feedback that transcription was successful
+const HIDE_WINDOW_DELAY_MS = 300;
+
 export const useAudioRecording = (toast, options = {}) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -17,6 +21,11 @@ export const useAudioRecording = (toast, options = {}) => {
       onStateChange: ({ isRecording, isProcessing }) => {
         setIsRecording(isRecording);
         setIsProcessing(isProcessing);
+
+        // Show overlay when recording starts, hide when done
+        if (isRecording || isProcessing) {
+          window.electronAPI?.showDictationPanel?.();
+        }
       },
       onError: (error) => {
         toast({
@@ -47,6 +56,11 @@ export const useAudioRecording = (toast, options = {}) => {
             });
           }
         }
+
+        // Hide overlay after transcription (with brief delay for visual feedback)
+        setTimeout(() => {
+          window.electronAPI?.hideWindow?.();
+        }, HIDE_WINDOW_DELAY_MS);
       },
     });
 
@@ -84,7 +98,7 @@ export const useAudioRecording = (toast, options = {}) => {
     };
 
     const disposeNoAudio = window.electronAPI.onNoAudioDetected?.(
-      handleNoAudioDetected
+      handleNoAudioDetected,
     );
 
     // Cleanup
