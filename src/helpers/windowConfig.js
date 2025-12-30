@@ -1,8 +1,8 @@
 const path = require("path");
 
 // Window dimension constants
-const DICTATION_WINDOW_WIDTH = 72; // Just big enough for the mic button (56px + padding)
-const DICTATION_WINDOW_HEIGHT = 72; // Square window for circular button
+const DICTATION_WINDOW_WIDTH = 600; // XL size for displaying messages and logs
+const DICTATION_WINDOW_HEIGHT = 500; // XL size for displaying messages and logs
 const CONTROL_PANEL_WIDTH = 1200; // Default width for settings/control panel
 const CONTROL_PANEL_HEIGHT = 800; // Default height for settings/control panel
 
@@ -19,7 +19,7 @@ const MAIN_WINDOW_CONFIG = {
   },
   frame: false,
   alwaysOnTop: true,
-  resizable: false,
+  resizable: true,
   transparent: true, // Opaque window for better compatibility
   show: false, // Start hidden, show when recording
   skipTaskbar: true, // Hide from taskbar since it's just a small indicator
