@@ -49,6 +49,11 @@ const FIXED_SPEECH_THRESHOLD = 0.008; // Fixed threshold when ambient is unrelia
 const FIXED_SILENCE_THRESHOLD = 0.005; // Fixed silence threshold (absolute)
 const AMBIENT_UNRELIABLE_THRESHOLD = 0.008; // Use fixed thresholds when ambient exceeds this (lowered from 0.02)
 
+// Diagnostic logging constants
+const EARLY_TICK_LOG_LIMIT = 30; // Log first N ticks to see initial behavior
+const HEARTBEAT_TICK_INTERVAL = 5; // Log heartbeat every N ticks to verify interval is running
+const MAX_COUNTER_VALUE = Number.MAX_SAFE_INTEGER; // Prevent counter overflow
+
 class AudioManager {
   constructor() {
     this.mediaRecorder = null;
@@ -87,7 +92,8 @@ class AudioManager {
     // Atomic state flag to prevent race conditions during stop
     this._isStopping = false;
 
-    // Audio device enumeration state
+    // Mutex-like flag to prevent race conditions during start/stop transitions
+    this._isStarting = false;
     this.hasEnumeratedDevices = false;
     this.permissionGranted = false;
     this.availableDevices = [];
@@ -207,15 +213,17 @@ class AudioManager {
 
   // Check if current audio level is silence using adaptive RMS threshold
   checkAudioLevel() {
-    // Counter to track all interval calls (not just calibration)
-    this._checkCounter++;
+    // Counter to track all interval calls (with overflow protection)
+    this._checkCounter = (this._checkCounter + 1) % MAX_COUNTER_VALUE;
 
-    // Debug: log first call to verify interval is running
+    // First call logging
     if (!this._firstCheckLogged) {
       this._firstCheckLogged = true;
       if (isDebugMode) {
-        console.log("[AudioManager] checkAudioLevel first call:", {
+        console.log("[AudioManager] checkAudioLevel FIRST CALL", {
+          tick: this._checkCounter,
           hasAnalyser: !!this.analyser,
+          audioContextState: this.audioContext?.state ?? "none",
           isRecording: this.isRecording,
           cachedSettings: this.cachedSilenceSettings,
           isCalibrating: this.isCalibrating,
@@ -223,7 +231,9 @@ class AudioManager {
         });
       }
       window.electronAPI?.logReasoning?.("SILENCE_FIRST_CHECK", {
+        tick: this._checkCounter,
         hasAnalyser: !!this.analyser,
+        audioContextState: this.audioContext?.state ?? "none",
         isRecording: this.isRecording,
         cachedSettings: this.cachedSilenceSettings,
         isCalibrating: this.isCalibrating,
@@ -231,41 +241,65 @@ class AudioManager {
       });
     }
 
-    // Log every 5th call to track interval health without spamming
-    if (this._checkCounter % 5 === 0) {
+    // Consolidated diagnostic logging (early ticks or heartbeat)
+    const isEarlyTick = this._checkCounter <= EARLY_TICK_LOG_LIMIT;
+    const isHeartbeat = this._checkCounter % HEARTBEAT_TICK_INTERVAL === 0;
+    const shouldLog = isEarlyTick || isHeartbeat;
+
+    if (shouldLog) {
+      const logType = isEarlyTick
+        ? "SILENCE_EARLY_TICK"
+        : "SILENCE_INTERVAL_HEARTBEAT";
+      const logData = {
+        tick: this._checkCounter,
+        isCalibrating: this.isCalibrating,
+        sampleCount: this.ambientCalibrationSamples.length,
+        hasAnalyser: !!this.analyser,
+        isRecording: this.isRecording,
+        ambientNoiseLevel: this.ambientNoiseLevel?.toFixed(4) ?? null,
+        peakRms: this._peakSpeechRms.toFixed(4),
+        consecutiveSilenceTicks: this._consecutiveSilenceTicks,
+        consecutiveSpeechTicks: this._consecutiveSpeechTicks,
+        hasDetectedSpeech: this.hasDetectedSpeech,
+      };
+
+      // Console logging only in debug mode and for early ticks (reduced verbosity)
+      if (isDebugMode && isEarlyTick) {
+        console.log(
+          "[AudioManager] checkAudioLevel tick #" + this._checkCounter,
+          {
+            isCalibrating: this.isCalibrating,
+            sampleCount: this.ambientCalibrationSamples.length,
+            ambientNoiseLevel: this.ambientNoiseLevel?.toFixed(4) ?? "null",
+            hasDetectedSpeech: this.hasDetectedSpeech,
+            consecutiveSilenceTicks: this._consecutiveSilenceTicks,
+            consecutiveSpeechTicks: this._consecutiveSpeechTicks,
+          },
+        );
+      }
+
+      // IPC logging for all diagnostics (gated by debug mode)
       if (isDebugMode) {
-        window.electronAPI?.logReasoning?.("SILENCE_INTERVAL_TICK", {
-          tickNumber: this._checkCounter,
-          isCalibrating: this.isCalibrating,
-          sampleCount: this.ambientCalibrationSamples.length,
-          hasAnalyser: !!this.analyser,
-          isRecording: this.isRecording,
-          ambientNoiseLevel: this.ambientNoiseLevel?.toFixed(4),
-          peakRms: this._peakSpeechRms.toFixed(4),
-          consecutiveSilenceTicks: this._consecutiveSilenceTicks,
-          consecutiveSpeechTicks: this._consecutiveSpeechTicks,
-          hasDetectedSpeech: this.hasDetectedSpeech,
-        });
+        window.electronAPI?.logReasoning?.(logType, logData);
       }
     }
 
-    // Log each check during calibration to see what's happening
+    // Calibration-specific logging (always logged via IPC in debug mode)
     if (this.isCalibrating) {
       if (isDebugMode) {
         console.log("[AudioManager] Calibration tick:", {
           tick: this._checkCounter,
           sampleCount: this.ambientCalibrationSamples.length,
           targetSamples: AMBIENT_CALIBRATION_SAMPLES,
-          hasAnalyser: !!this.analyser,
-          isRecording: this.isRecording,
         });
       }
-      // Also log via IPC for calibration ticks (important for debugging)
-      window.electronAPI?.logReasoning?.("CALIBRATION_TICK", {
-        tick: this._checkCounter,
-        sampleCount: this.ambientCalibrationSamples.length,
-        targetSamples: AMBIENT_CALIBRATION_SAMPLES,
-      });
+      if (isDebugMode) {
+        window.electronAPI?.logReasoning?.("CALIBRATION_TICK", {
+          tick: this._checkCounter,
+          sampleCount: this.ambientCalibrationSamples.length,
+          targetSamples: AMBIENT_CALIBRATION_SAMPLES,
+        });
+      }
     }
 
     if (!this.analyser || !this.isRecording) {
@@ -612,6 +646,62 @@ class AudioManager {
 
   // Start monitoring audio levels for silence detection
   async startSilenceDetection(stream) {
+    // Prevent race conditions: if already starting, return early
+    if (this._isStarting) {
+      if (isDebugMode) {
+        console.warn(
+          "[AudioManager] Silence detection already starting, skipping",
+        );
+      }
+      return;
+    }
+    this._isStarting = true;
+
+    // Log entry with diagnostics
+    const callCount = (this._silenceDetectionCallCount || 0) + 1;
+    this._silenceDetectionCallCount = callCount;
+    if (isDebugMode) {
+      console.log(
+        "[AudioManager] startSilenceDetection called (call #" + callCount + ")",
+      );
+      console.log(
+        "[AudioManager] Existing AudioContext:",
+        !!this.audioContext,
+        "state:",
+        this.audioContext?.state || "none",
+      );
+    }
+    window.electronAPI?.logReasoning?.("SILENCE_DETECTION_START", {
+      callNumber: callCount,
+      hasExistingAudioContext: !!this.audioContext,
+      audioContextState: this.audioContext?.state || "none",
+      hasExistingAnalyser: !!this.analyser,
+      hasExistingInterval: !!this.silenceCheckInterval,
+      isRecording: this.isRecording,
+    });
+
+    // Clear all cached state at START (prevents state from previous recording)
+    if (this.silenceCheckInterval) {
+      if (isDebugMode) {
+        console.log(
+          "[AudioManager] Clearing previous interval:",
+          this.silenceCheckInterval,
+        );
+      }
+      clearInterval(this.silenceCheckInterval);
+      this.silenceCheckInterval = null;
+    }
+
+    // Disconnect the old MediaStreamSource (but keep AudioContext)
+    if (this.silenceDetectionSource) {
+      try {
+        this.silenceDetectionSource.disconnect();
+      } catch {
+        // Ignore disconnect errors
+      }
+      this.silenceDetectionSource = null;
+    }
+
     // Get settings first to check if enabled (before cleanup which clears cache)
     const settings = this.getSilenceSettings();
 
@@ -622,6 +712,7 @@ class AudioManager {
     }
     window.electronAPI?.logReasoning?.("SILENCE_DETECTION_INIT", {
       ...settings,
+      callNumber: callCount,
       rawLocalStorage: {
         silenceAutoStop: localStorage.getItem("silenceAutoStop"),
         silenceThreshold: localStorage.getItem("silenceThreshold"),
@@ -633,20 +724,41 @@ class AudioManager {
         console.log("[AudioManager] Silence detection is disabled");
       }
       this.cachedSilenceSettings = null; // Clear cache when disabled
+      this._isStarting = false; // Reset mutex flag
       return;
     }
 
-    // Clean up any existing detection first (prevents AudioContext accumulation)
-    await this.stopSilenceDetection();
-
-    // Cache settings AFTER cleanup (stopSilenceDetection clears cachedSilenceSettings)
+    // Cache settings
     this.cachedSilenceSettings = settings;
     this.useBackgroundNoiseDetection = settings.useBackgroundNoiseDetection;
 
     try {
-      this.audioContext = new (
-        window.AudioContext || window.webkitAudioContext
-      )();
+      // AudioContext reuse: Create once, reuse for all sessions
+      // This prevents browser-specific timing issues
+      if (!this.audioContext || this.audioContext.state === "closed") {
+        if (isDebugMode) {
+          console.log("[AudioManager] Creating new AudioContext (singleton)");
+        }
+        this.audioContext = new (
+          window.AudioContext || window.webkitAudioContext
+        )();
+        window.electronAPI?.logReasoning?.("AUDIOCONTEXT_CREATED", {
+          callNumber: callCount,
+          state: this.audioContext.state,
+        });
+      } else {
+        if (isDebugMode) {
+          console.log(
+            "[AudioManager] Reusing existing AudioContext, state:",
+            this.audioContext.state,
+          );
+        }
+        window.electronAPI?.logReasoning?.("AUDIOCONTEXT_REUSED", {
+          callNumber: callCount,
+          state: this.audioContext.state,
+        });
+      }
+
       this.analyser = this.audioContext.createAnalyser();
       this.analyser.fftSize = 256;
 
@@ -667,9 +779,13 @@ class AudioManager {
         if (isDebugMode) {
           console.log("[AudioManager] AudioContext resumed successfully");
         }
+        window.electronAPI?.logReasoning?.("AUDIOCONTEXT_RESUMED", {
+          previousState: "suspended",
+          newState: this.audioContext.state,
+        });
       }
 
-      // Reset silence tracking
+      // Reset all tracking state for new recording
       this.silenceStartTime = null;
       this.hasDetectedSpeech = false;
       this._consecutiveSilenceTicks = 0; // Reset consecutive silence counter
@@ -710,8 +826,7 @@ class AudioManager {
         });
       }
 
-      // Start checking audio levels
-      // Wrap in try-catch to prevent silent failures
+      // Interval with error handling (preserves full error context)
       this.silenceCheckInterval = setInterval(() => {
         try {
           this.checkAudioLevel();
@@ -724,10 +839,11 @@ class AudioManager {
               error,
             );
           }
-          // Log error with count
+          // Log error with full context (name, message, stack)
           window.electronAPI?.logReasoning?.("SILENCE_CHECK_ERROR", {
-            error: error.message,
-            stack: error.stack,
+            errorName: error.name,
+            errorMessage: error.message,
+            errorStack: error.stack,
             errorCount: this._intervalErrorCount,
           });
 
@@ -751,6 +867,11 @@ class AudioManager {
         );
         console.log("[AudioManager] Silence detection started successfully");
       }
+      window.electronAPI?.logReasoning?.("SILENCE_DETECTION_STARTED", {
+        callNumber: callCount,
+        intervalId: this.silenceCheckInterval,
+        checkIntervalMs: SILENCE_CHECK_INTERVAL_MS,
+      });
     } catch (error) {
       if (isDebugMode) {
         console.warn(
@@ -758,17 +879,30 @@ class AudioManager {
           error,
         );
       }
+      window.electronAPI?.logReasoning?.("SILENCE_DETECTION_FAILED", {
+        callNumber: callCount,
+        errorName: error.name,
+        errorMessage: error.message,
+        errorStack: error.stack,
+      });
       // Notify user that the feature isn't working
       this.onError?.({
         title: "Silence Detection Unavailable",
         description:
           "Auto-stop on silence couldn't be enabled. Recording will work normally.",
       });
+    } finally {
+      // Always reset starting flag when done (success or failure)
+      this._isStarting = false;
     }
   }
 
   // Stop silence detection and cleanup
   async stopSilenceDetection() {
+    if (isDebugMode) {
+      console.log("[AudioManager] stopSilenceDetection called");
+    }
+
     if (this.silenceCheckInterval) {
       if (isDebugMode) {
         console.log(
@@ -776,11 +910,15 @@ class AudioManager {
           this.silenceCheckInterval,
         );
       }
+      window.electronAPI?.logReasoning?.("SILENCE_DETECTION_STOPPING", {
+        clearingInterval: true,
+        intervalId: this.silenceCheckInterval,
+      });
       clearInterval(this.silenceCheckInterval);
       this.silenceCheckInterval = null;
     }
 
-    // Disconnect source before closing context
+    // Disconnect source (but keep AudioContext for reuse)
     if (this.silenceDetectionSource) {
       try {
         this.silenceDetectionSource.disconnect();
@@ -790,16 +928,8 @@ class AudioManager {
       this.silenceDetectionSource = null;
     }
 
-    // IMPORTANT: Await the close to ensure AudioContext is fully closed before creating a new one
-    if (this.audioContext && this.audioContext.state !== "closed") {
-      try {
-        await this.audioContext.close();
-      } catch {
-        // Ignore close errors
-      }
-    }
-
-    this.audioContext = null;
+    // AudioContext reuse: Don't close AudioContext, keep it for next recording
+    // Only reset the analyser (will be recreated on next start)
     this.analyser = null;
     this.silenceStartTime = null;
     this.hasDetectedSpeech = false;
@@ -811,6 +941,16 @@ class AudioManager {
     this.ambientNoiseLevel = null;
     this.isCalibrating = true;
     this.ambientTooLoud = false;
+
+    if (isDebugMode) {
+      console.log(
+        "[AudioManager] Silence detection stopped (AudioContext kept for reuse)",
+      );
+    }
+    window.electronAPI?.logReasoning?.("SILENCE_DETECTION_STOPPED", {
+      audioContextKept: !!this.audioContext,
+      audioContextState: this.audioContext?.state || "none",
+    });
   }
 
   // Analyze audio blob to detect if it contains speech or is just silence
