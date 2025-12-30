@@ -139,8 +139,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setTrayEnabled: (enabled) => ipcRenderer.invoke("set-tray-enabled", enabled),
   setRecordingState: (isRecording) =>
     ipcRenderer.invoke("set-recording-state", isRecording),
-  playAudioFeedback: (sound) =>
-    ipcRenderer.invoke("play-audio-feedback", sound),
+
+  // Audio feedback
+  playAudioFeedback: (sound, deviceId = "default") =>
+    ipcRenderer.invoke("play-audio-feedback", sound, deviceId),
 
   // Update functions
   checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),

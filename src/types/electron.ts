@@ -274,19 +274,12 @@ declare global {
       setRecordingState: (
         isRecording: boolean,
       ) => Promise<{ success: boolean }>;
+
+      // Audio feedback
       playAudioFeedback: (
-        sound:
-          | "none"
-          | "beep"
-          | "bubble"
-          | "tap"
-          | "ping"
-          | "whoosh"
-          | "done"
-          | "muted-alert"
-          | "chime"
-          | "click",
-      ) => Promise<{ success: boolean; fallback?: boolean; error?: string }>;
+        sound: string,
+        deviceId?: string,
+      ) => Promise<{ success: boolean; error?: string }>;
 
       // App management
       cleanupApp: () => Promise<{ success: boolean; message: string }>;

@@ -4,6 +4,7 @@ const path = require("path");
 const fs = require("fs");
 const AppUtils = require("../utils");
 const debugLogger = require("./debugLogger");
+const { playAudioFeedback } = require("./audioPlayer");
 
 // Simple rate limiter to prevent IPC spam
 class RateLimiter {
@@ -141,6 +142,17 @@ class IPCHandlers {
       return { success: true };
     });
 
+    // Audio feedback handler - plays sound with optional device selection
+    ipcMain.handle("play-audio-feedback", async (event, sound, deviceId) => {
+      try {
+        const result = await playAudioFeedback(sound, deviceId || "default");
+        return result;
+      } catch (error) {
+        console.error("Failed to play audio feedback:", error);
+        return { success: false, error: error.message };
+      }
+    });
+
     ipcMain.handle("set-tray-enabled", async (event, enabled) => {
       try {
         if (enabled) {
@@ -159,154 +171,6 @@ class IPCHandlers {
       console.log("[IPC] set-recording-state called:", isRecording);
       this.trayManager?.setRecordingState(Boolean(isRecording));
       return { success: true };
-    });
-
-    ipcMain.handle("play-audio-feedback", async (event, sound) => {
-      console.log("[IPC] play-audio-feedback called:", sound);
-      try {
-        // Handle "none" - no sound
-        if (sound === "none") {
-          return { success: true };
-        }
-
-        if (sound === "beep") {
-          console.log("[IPC] Playing system beep");
-          shell.beep();
-          return { success: true };
-        }
-
-        // Play custom sound file
-        // Security: Validate sound name to prevent path injection
-        const validSounds = [
-          "bubble",
-          "tap",
-          "ping",
-          "whoosh",
-          "done",
-          "muted-alert",
-          "chime",
-          "click",
-        ];
-        if (!validSounds.includes(sound)) {
-          console.warn(
-            `[IPC] Invalid sound name: ${sound}, falling back to beep`,
-          );
-          shell.beep();
-          return { success: true, fallback: true };
-        }
-
-        const soundFile = `${sound}.ogg`;
-        console.log("[IPC] Looking for sound file:", soundFile);
-        const isDevelopment = process.env.NODE_ENV === "development";
-
-        // Define paths in order of preference
-        const candidatePaths = isDevelopment
-          ? [path.join(__dirname, "..", "assets", "sounds", soundFile)]
-          : [
-              // Most likely production paths first
-              path.join(process.resourcesPath, "assets", "sounds", soundFile),
-              path.join(
-                process.resourcesPath,
-                "src",
-                "assets",
-                "sounds",
-                soundFile,
-              ),
-              path.join(app.getAppPath(), "src", "assets", "sounds", soundFile),
-            ];
-
-        let soundPath = null;
-        for (const p of candidatePaths) {
-          if (fs.existsSync(p)) {
-            soundPath = p;
-            break;
-          }
-        }
-
-        if (!soundPath) {
-          console.warn(
-            `Sound file not found: ${soundFile}, falling back to beep`,
-          );
-          shell.beep();
-          return { success: true, fallback: true };
-        }
-
-        // Play sound using platform-specific command
-        const playSound = (cmd, args) => {
-          try {
-            const child = spawn(cmd, args, {
-              detached: true,
-              stdio: "ignore",
-            });
-            child.on("error", () => {
-              // Silently ignore spawn errors
-            });
-            child.unref();
-            return true;
-          } catch {
-            return false;
-          }
-        };
-
-        if (process.platform === "linux") {
-          // Try paplay (PulseAudio/PipeWire) first, then aplay (ALSA)
-          const players = ["paplay", "aplay", "play"];
-          for (const player of players) {
-            if (playSound(player, [soundPath])) {
-              return { success: true };
-            }
-          }
-          shell.beep();
-          return { success: true, fallback: true };
-        } else if (process.platform === "darwin") {
-          if (playSound("afplay", [soundPath])) {
-            return { success: true };
-          }
-          shell.beep();
-          return { success: true, fallback: true };
-        } else if (process.platform === "win32") {
-          // Security: Validate soundPath is one of the expected candidate paths
-          // and doesn't contain dangerous characters for PowerShell
-          if (!candidatePaths.includes(soundPath)) {
-            console.warn(
-              "[IPC] Sound path not in candidate paths, falling back to beep",
-            );
-            shell.beep();
-            return { success: true, fallback: true };
-          }
-
-          // Reject paths with newlines, backticks, or null bytes that could escape PowerShell
-          if (/[\r\n`\0]/.test(soundPath)) {
-            console.warn(
-              "[IPC] Sound path contains dangerous characters, falling back to beep",
-            );
-            shell.beep();
-            return { success: true, fallback: true };
-          }
-
-          // Escape single quotes in the path by doubling them for PowerShell
-          const escapedPath = soundPath.replace(/'/g, "''");
-          if (
-            playSound("powershell", [
-              "-NoProfile",
-              "-NonInteractive",
-              "-Command",
-              `Add-Type -AssemblyName presentationCore; $player = New-Object System.Windows.Media.MediaPlayer; $player.Open([Uri]'${escapedPath}'); $player.Play(); Start-Sleep -Milliseconds 2000`,
-            ])
-          ) {
-            return { success: true };
-          }
-          shell.beep();
-          return { success: true, fallback: true };
-        }
-
-        shell.beep();
-        return { success: true, fallback: true };
-      } catch (error) {
-        console.error("Failed to play audio feedback:", error);
-        shell.beep();
-        return { success: false, error: error.message, fallback: true };
-      }
     });
 
     // Environment handlers

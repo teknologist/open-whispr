@@ -124,57 +124,6 @@ export default function App() {
   // Settings for Whisper server
   const { useLocalWhisper, whisperModel } = useSettings();
 
-  // Start Whisper server on mount if local Whisper is enabled (preloads model to GPU)
-  useEffect(() => {
-    let isMounted = true;
-    let serverStarted = false;
-
-    const initWhisperServer = async () => {
-      if (useLocalWhisper && whisperModel) {
-        try {
-          console.log(`[App] Checking Whisper server status...`);
-          const status = await window.electronAPI?.whisperServerStatus?.();
-
-          if (!status?.running || status?.model !== whisperModel) {
-            console.log(
-              `[App] Starting Whisper server with model '${whisperModel}'...`,
-            );
-            const result =
-              await window.electronAPI?.whisperServerStart?.(whisperModel);
-            if (isMounted && result?.success) {
-              console.log(`[App] Whisper server started successfully`);
-              serverStarted = true;
-            } else if (isMounted && result?.error) {
-              console.warn(
-                `[App] Failed to start Whisper server: ${result.error}`,
-              );
-            }
-          } else {
-            console.log(
-              `[App] Whisper server already running with model '${whisperModel}'`,
-            );
-          }
-        } catch (error) {
-          console.warn(
-            `[App] Failed to initialize Whisper server: ${error.message}`,
-          );
-        }
-      }
-    };
-
-    initWhisperServer();
-
-    // Cleanup: stop server on unmount if we started it
-    return () => {
-      isMounted = false;
-      if (serverStarted) {
-        window.electronAPI?.whisperServerStop?.().catch(() => {
-          // Ignore cleanup errors
-        });
-      }
-    };
-  }, [useLocalWhisper, whisperModel]);
-
   // Sync feedback settings to main process whenever they change
   useEffect(() => {
     window.electronAPI?.setHideIndicatorWindow?.(hideIndicatorWindow);
@@ -184,26 +133,11 @@ export default function App() {
     window.electronAPI?.setTrayEnabled?.(showTrayIcon);
   }, [showTrayIcon]);
 
-  // Update tray icon state and play audio feedback when recording state changes
+  // Update tray icon state when recording state changes
   useEffect(() => {
-    // Update tray icon state
     window.electronAPI?.setRecordingState?.(isRecording);
-
-    // Play audio feedback only on state change (not on initial mount)
-    if (audioFeedbackEnabled && prevIsRecordingRef.current !== isRecording) {
-      const sound = isRecording ? soundOnRecordStart : soundOnRecordStop;
-      if (sound !== "none") {
-        window.electronAPI?.playAudioFeedback?.(sound);
-      }
-    }
-
     prevIsRecordingRef.current = isRecording;
-  }, [
-    isRecording,
-    audioFeedbackEnabled,
-    soundOnRecordStart,
-    soundOnRecordStop,
-  ]);
+  }, [isRecording]);
 
   const handleClose = () => {
     window.electronAPI.hideWindow();

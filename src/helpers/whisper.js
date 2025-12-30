@@ -21,6 +21,7 @@ class WhisperManager {
     this.serverProcess = null;
     this.serverReady = false;
     this.serverModel = null;
+    this.isStarting = false; // Prevents concurrent start calls
     this.pendingRequests = new Map(); // requestId -> { resolve, reject }
     this.requestIdCounter = 0;
     this.serverStdoutBuffer = "";
@@ -39,6 +40,29 @@ class WhisperManager {
         `Whisper server already running with model '${modelName}'`,
       );
       return { success: true, model: modelName };
+    }
+
+    // If another start is in progress, wait for it
+    if (this.isStarting) {
+      debugLogger.log(
+        `Whisper server already starting, waiting for it to complete...`,
+      );
+      // Wait up to 60 seconds for the other start to complete
+      const maxWait = 60000;
+      const checkInterval = 100;
+      let waited = 0;
+      while (this.isStarting && waited < maxWait) {
+        await new Promise((resolve) => setTimeout(resolve, checkInterval));
+        waited += checkInterval;
+      }
+      // Check again after waiting
+      if (
+        this.serverProcess &&
+        this.serverReady &&
+        this.serverModel === modelName
+      ) {
+        return { success: true, model: modelName };
+      }
     }
 
     // Stop existing server if running with different model
@@ -78,6 +102,9 @@ class WhisperManager {
     debugLogger.log(`Starting Whisper server with model '${modelName}'`);
 
     return new Promise((resolve, reject) => {
+      // Set starting flag to prevent concurrent starts
+      this.isStarting = true;
+
       this.serverProcess = spawn(pythonCmd, args, {
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
@@ -106,6 +133,7 @@ class WhisperManager {
         this.serverProcess = null;
         this.serverReady = false;
         this.serverModel = null;
+        this.isStarting = false; // Clear starting flag
 
         // Reject all pending requests
         for (const [, pending] of this.pendingRequests) {
@@ -119,12 +147,14 @@ class WhisperManager {
         debugLogger.error("Whisper server error:", error);
         this.serverProcess = null;
         this.serverReady = false;
+        this.isStarting = false; // Clear starting flag on error
         reject(error);
       });
 
       // Wait for server ready signal with timeout
       const startTimeout = setTimeout(() => {
         if (!this.serverReady) {
+          this.isStarting = false; // Clear starting flag on timeout
           this.stopServer();
           reject(new Error("Server startup timed out (60 seconds)"));
         }
@@ -135,6 +165,7 @@ class WhisperManager {
         if (response.type === "ready") {
           clearTimeout(startTimeout);
           this.serverReady = true;
+          this.isStarting = false; // Clear starting flag on success
           console.log(`[whisper] Server ready with model '${modelName}'`);
           resolve({ success: true, model: modelName });
           return true;
@@ -217,6 +248,7 @@ class WhisperManager {
         this.serverProcess = null;
         this.serverReady = false;
         this.serverModel = null;
+        this.isStarting = false; // Clear starting flag when stopping
         resolve({ success: true, message });
       };
 

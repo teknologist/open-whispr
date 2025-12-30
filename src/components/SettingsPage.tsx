@@ -161,9 +161,9 @@ export default function SettingsPage({
       }
     };
 
-    // Listen for device changes (always set up, only load when on transcription section)
+    // Listen for device changes (always set up, only load when on general or transcription section)
     const handleDeviceChange = () => {
-      if (activeSection === "transcription") {
+      if (activeSection === "general" || activeSection === "transcription") {
         loadDevices();
       }
     };
@@ -173,8 +173,8 @@ export default function SettingsPage({
       handleDeviceChange,
     );
 
-    // Load devices immediately if on transcription section
-    if (activeSection === "transcription") {
+    // Load devices immediately if on general or transcription section
+    if (activeSection === "general" || activeSection === "transcription") {
       loadDevices();
     }
 
@@ -1282,9 +1282,18 @@ export default function SettingsPage({
                           {value !== "none" && (
                             <button
                               type="button"
-                              onClick={() =>
-                                window.electronAPI?.playAudioFeedback?.(value)
-                              }
+                              onClick={() => {
+                                const deviceIdRaw = localStorage.getItem(
+                                  "selectedOutputDevice",
+                                );
+                                const deviceId = deviceIdRaw
+                                  ? JSON.parse(deviceIdRaw)
+                                  : "default";
+                                window.electronAPI?.playAudioFeedback?.(
+                                  value,
+                                  deviceId,
+                                );
+                              }}
                               className="p-1 text-gray-400 hover:text-indigo-600 transition-colors"
                               title="Test sound"
                             >
@@ -1319,6 +1328,104 @@ export default function SettingsPage({
                 <p className="text-xs text-rose-700">
                   Current cache location: <code>{cachePathHint}</code>
                 </p>
+              </div>
+            </div>
+
+            {/* Audio Device Selection */}
+            <div className="border-t pt-8">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                  Audio Devices
+                </h3>
+                <p className="text-sm text-gray-600 mb-6">
+                  Select your preferred microphone and speakers for recording
+                  and audio feedback.
+                </p>
+              </div>
+
+              <div className="space-y-4 p-4 bg-gray-50 border border-gray-200 rounded-xl">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="font-medium text-gray-900">
+                    Device Selection
+                  </h4>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      try {
+                        await navigator.mediaDevices.getUserMedia({
+                          audio: true,
+                        });
+                        const devices =
+                          await navigator.mediaDevices.enumerateDevices();
+                        setAvailableInputDevices(
+                          devices
+                            .filter((d) => d.kind === "audioinput")
+                            .map((d) => ({
+                              deviceId: d.deviceId,
+                              label:
+                                d.label ||
+                                `Microphone ${d.deviceId.slice(0, 8)}...`,
+                            })),
+                        );
+                        setAvailableOutputDevices(
+                          devices
+                            .filter((d) => d.kind === "audiooutput")
+                            .map((d) => ({
+                              deviceId: d.deviceId,
+                              label:
+                                d.label ||
+                                `Speakers ${d.deviceId.slice(0, 8)}...`,
+                            })),
+                        );
+                      } catch (error) {
+                        console.error("Failed to refresh devices:", error);
+                      }
+                    }}
+                  >
+                    <RefreshCw className="h-4 w-4 mr-1" />
+                    Refresh
+                  </Button>
+                </div>
+
+                {/* Input Device */}
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Microphone (Input)
+                  </label>
+                  <select
+                    value={selectedInputDevice}
+                    onChange={(e) => setSelectedInputDevice(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                  >
+                    <option value="default">System Default</option>
+                    {availableInputDevices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Output Device */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Speakers (Output for audio feedback)
+                  </label>
+                  <select
+                    value={selectedOutputDevice}
+                    onChange={(e) => setSelectedOutputDevice(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                  >
+                    <option value="default">System Default</option>
+                    {availableOutputDevices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </div>
           </div>
@@ -1460,90 +1567,6 @@ export default function SettingsPage({
                     });
                   }}
                 />
-              </div>
-            </div>
-
-            {/* Audio Device Selection */}
-            <div className="space-y-4 p-4 bg-gray-50 border border-gray-200 rounded-xl">
-              <div className="flex items-center justify-between mb-3">
-                <h4 className="font-medium text-gray-900">Audio Devices</h4>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={async () => {
-                    try {
-                      await navigator.mediaDevices.getUserMedia({
-                        audio: true,
-                      });
-                      const devices =
-                        await navigator.mediaDevices.enumerateDevices();
-                      setAvailableInputDevices(
-                        devices
-                          .filter((d) => d.kind === "audioinput")
-                          .map((d) => ({
-                            deviceId: d.deviceId,
-                            label:
-                              d.label ||
-                              `Microphone ${d.deviceId.slice(0, 8)}...`,
-                          })),
-                      );
-                      setAvailableOutputDevices(
-                        devices
-                          .filter((d) => d.kind === "audiooutput")
-                          .map((d) => ({
-                            deviceId: d.deviceId,
-                            label:
-                              d.label ||
-                              `Speakers ${d.deviceId.slice(0, 8)}...`,
-                          })),
-                      );
-                    } catch (error) {
-                      console.error("Failed to refresh devices:", error);
-                    }
-                  }}
-                >
-                  <RefreshCw className="h-4 w-4 mr-1" />
-                  Refresh
-                </Button>
-              </div>
-
-              {/* Input Device */}
-              <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Microphone (Input)
-                </label>
-                <select
-                  value={selectedInputDevice}
-                  onChange={(e) => setSelectedInputDevice(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                >
-                  <option value="default">System Default</option>
-                  {availableInputDevices.map((device) => (
-                    <option key={device.deviceId} value={device.deviceId}>
-                      {device.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Output Device */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Speakers (Output for audio feedback)
-                </label>
-                <select
-                  value={selectedOutputDevice}
-                  onChange={(e) => setSelectedOutputDevice(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                >
-                  <option value="default">System Default</option>
-                  {availableOutputDevices.map((device) => (
-                    <option key={device.deviceId} value={device.deviceId}>
-                      {device.label}
-                    </option>
-                  ))}
-                </select>
               </div>
             </div>
 

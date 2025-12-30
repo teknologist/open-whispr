@@ -31,28 +31,48 @@ export const useAudioRecording = (toast, options = {}) => {
       audioManagerRef.current = new AudioManager();
     }
 
-    // Helper to play transition sounds
-    const playTransitionSound = (settingKey, defaultSound) => {
+    // Helper to play transition sounds with proper awaiting
+    const playTransitionSound = async (settingKey, defaultSound) => {
       const audioFeedbackEnabled =
         localStorage.getItem("audioFeedbackEnabled") === "true";
+      console.log("[useAudioRecording] playTransitionSound:", {
+        settingKey,
+        defaultSound,
+        audioFeedbackEnabled,
+      });
       if (!audioFeedbackEnabled) return;
 
       const sound = localStorage.getItem(settingKey) || defaultSound;
+      console.log("[useAudioRecording] Sound to play:", sound);
       if (sound !== "none") {
-        window.electronAPI?.playAudioFeedback?.(sound);
+        const deviceIdRaw = localStorage.getItem("selectedOutputDevice");
+        const deviceId = deviceIdRaw ? JSON.parse(deviceIdRaw) : "default";
+        try {
+          await window.electronAPI?.playAudioFeedback?.(sound, deviceId);
+        } catch (err) {
+          console.warn("[useAudioRecording] Sound playback failed:", err);
+        }
       }
     };
 
     // Set up callbacks (using refs to always have latest values)
     audioManagerRef.current.setCallbacks({
-      onStateChange: ({ isRecording, isProcessing }) => {
+      onStateChange: async ({ isRecording, isProcessing }) => {
         const wasRecording = wasRecordingRef.current;
+        console.log("[useAudioRecording] onStateChange:", {
+          isRecording,
+          isProcessing,
+          wasRecording,
+        });
 
-        // Play record start/stop sounds
+        // Play record start sound
         if (isRecording && !wasRecording) {
-          playTransitionSound("soundOnRecordStart", "bubble");
-        } else if (!isRecording && wasRecording && !isProcessing) {
-          playTransitionSound("soundOnRecordStop", "tap");
+          console.log("[useAudioRecording] Triggering START sound");
+          await playTransitionSound("soundOnRecordStart", "bubble");
+        } else if (!isRecording && wasRecording) {
+          console.log("[useAudioRecording] Triggering STOP sound");
+          // Play stop sound when recording ends, even if processing started
+          await playTransitionSound("soundOnRecordStop", "tap");
         }
 
         // Track previous state for next comparison
@@ -69,14 +89,23 @@ export const useAudioRecording = (toast, options = {}) => {
           window.electronAPI?.showDictationPanel?.();
         }
       },
-      onError: (error) => {
+      onError: async (error) => {
         // Play error sound if enabled
         const audioFeedbackEnabled =
           localStorage.getItem("audioFeedbackEnabled") === "true";
         if (audioFeedbackEnabled) {
           const sound = localStorage.getItem("soundOnError") || "none";
           if (sound !== "none") {
-            window.electronAPI?.playAudioFeedback?.(sound);
+            const deviceIdRaw = localStorage.getItem("selectedOutputDevice");
+            const deviceId = deviceIdRaw ? JSON.parse(deviceIdRaw) : "default";
+            try {
+              await window.electronAPI?.playAudioFeedback?.(sound, deviceId);
+            } catch (err) {
+              console.warn(
+                "[useAudioRecording] Error sound playback failed:",
+                err,
+              );
+            }
           }
         }
 
@@ -96,7 +125,18 @@ export const useAudioRecording = (toast, options = {}) => {
           if (audioFeedbackEnabled) {
             const sound = localStorage.getItem("soundOnSuccess") || "done";
             if (sound !== "none") {
-              window.electronAPI?.playAudioFeedback?.(sound);
+              const deviceIdRaw = localStorage.getItem("selectedOutputDevice");
+              const deviceId = deviceIdRaw
+                ? JSON.parse(deviceIdRaw)
+                : "default";
+              try {
+                await window.electronAPI?.playAudioFeedback?.(sound, deviceId);
+              } catch (err) {
+                console.warn(
+                  "[useAudioRecording] Success sound playback failed:",
+                  err,
+                );
+              }
             }
           }
 
