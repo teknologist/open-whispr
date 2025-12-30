@@ -101,6 +101,39 @@ export const useAudioRecording = (toast, options = {}) => {
       },
     });
 
+    // Enumerate audio devices on initialization (triggers permission prompt)
+    // This is critical for Linux GUI launch where audio subsystem may not be initialized
+    const initializeAudioDevices = async () => {
+      try {
+        const result = await audioManagerRef.current.enumerateAudioDevices();
+
+        if (!result.success) {
+          if (result.error?.includes("Permission denied")) {
+            console.warn(
+              "[useAudioRecording] Microphone permission required. Please grant access when prompted.",
+            );
+          } else {
+            console.warn(
+              "[useAudioRecording] Audio device check failed:",
+              result.error,
+            );
+          }
+        } else if (result.devices.length === 0) {
+          console.warn(
+            "[useAudioRecording] No audio input devices found. Please connect a microphone.",
+          );
+        } else {
+          console.log(
+            `[useAudioRecording] Found ${result.devices.length} audio device(s)`,
+          );
+        }
+      } catch (error) {
+        console.error("[useAudioRecording] Device enumeration error:", error);
+      }
+    };
+
+    initializeAudioDevices();
+
     // Set up hotkey listener
     const handleToggle = () => {
       if (!audioManagerRef.current) {

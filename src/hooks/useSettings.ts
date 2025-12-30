@@ -514,3 +514,49 @@ export function useSettings() {
     updateSilenceSettings,
   };
 }
+
+// Audio device settings
+export interface AudioDeviceSettings {
+  selectedInputDevice: string; // deviceId for microphone
+  selectedOutputDevice: string; // deviceId for speakers
+}
+
+export function useAudioDeviceSettings() {
+  const [selectedInputDevice, setSelectedInputDevice] = useLocalStorage(
+    "selectedInputDevice",
+    "default", // Use system default
+  );
+
+  const [selectedOutputDevice, setSelectedOutputDevice] = useLocalStorage(
+    "selectedOutputDevice",
+    "default", // Use system default
+  );
+
+  return {
+    selectedInputDevice,
+    selectedOutputDevice,
+    setSelectedInputDevice,
+    setSelectedOutputDevice,
+  };
+}
+
+// General settings (includes startMinimized)
+export interface GeneralSettings {
+  startMinimized: boolean;
+}
+
+export function useGeneralSettings() {
+  const [startMinimized, setStartMinimized] = useLocalStorage(
+    "startMinimized",
+    false,
+    {
+      serialize: String,
+      deserialize: (value) => value === "true",
+    },
+  );
+
+  return {
+    startMinimized,
+    setStartMinimized,
+  };
+}

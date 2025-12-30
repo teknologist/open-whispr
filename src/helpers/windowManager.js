@@ -146,15 +146,21 @@ class WindowManager {
     return await this.dragManager.stopWindowDrag();
   }
 
-  async createControlPanelWindow() {
+  async createControlPanelWindow(startMinimized = false) {
     if (this.controlPanelWindow && !this.controlPanelWindow.isDestroyed()) {
       if (this.controlPanelWindow.isMinimized()) {
         this.controlPanelWindow.restore();
       }
-      if (!this.controlPanelWindow.isVisible()) {
-        this.controlPanelWindow.show();
+      // Respect startMinimized when window already exists
+      if (!startMinimized) {
+        if (!this.controlPanelWindow.isVisible()) {
+          this.controlPanelWindow.show();
+        }
+        this.controlPanelWindow.focus();
+      } else if (this.controlPanelWindow.isVisible()) {
+        // If starting minimized but window is visible, hide it
+        this.controlPanelWindow.hide();
       }
-      this.controlPanelWindow.focus();
       return;
     }
 
@@ -164,8 +170,15 @@ class WindowManager {
       if (process.platform === "win32") {
         this.controlPanelWindow.setSkipTaskbar(false);
       }
-      this.controlPanelWindow.show();
-      this.controlPanelWindow.focus();
+
+      // Only show if NOT starting minimized
+      if (!startMinimized) {
+        this.controlPanelWindow.show();
+        this.controlPanelWindow.focus();
+      } else {
+        // Start minimized - hide to tray instead
+        this.controlPanelWindow.hide();
+      }
     });
 
     this.controlPanelWindow.on("show", () => {

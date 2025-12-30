@@ -87,6 +87,11 @@ class AudioManager {
     // Atomic state flag to prevent race conditions during stop
     this._isStopping = false;
 
+    // Audio device enumeration state
+    this.hasEnumeratedDevices = false;
+    this.permissionGranted = false;
+    this.availableDevices = [];
+
     // Debug logging flags
     this._firstCheckLogged = false;
     this._checkCounter = 0;
@@ -94,6 +99,99 @@ class AudioManager {
     this._ambientWarningLogged = false; // Track if we warned about unreliable ambient
     this._debugLogCounter = 0;
     this._intervalErrorCount = 0; // Track consecutive interval errors
+  }
+
+  /**
+   * Enumerate audio devices and trigger permission prompt if needed
+   * @returns {Promise<{success: boolean, devices: Array, hasPermission: boolean, error?: string}>}
+   */
+  async enumerateAudioDevices() {
+    let stream = null;
+    try {
+      // Try getUserMedia to trigger permission prompt
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      // Now enumerate devices
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter((d) => d.kind === "audioinput");
+
+      this.hasEnumeratedDevices = true;
+      this.permissionGranted = true;
+      this.availableDevices = audioInputs;
+
+      if (isDebugMode) {
+        console.log("[AudioManager] enumerateAudioDevices:", {
+          success: true,
+          deviceCount: audioInputs.length,
+          devices: audioInputs.map((d) => ({
+            id: d.deviceId,
+            label: d.label || "Unnamed",
+          })),
+        });
+      }
+
+      return { success: true, devices: audioInputs, hasPermission: true };
+    } catch (error) {
+      this.hasEnumeratedDevices = true;
+      this.permissionGranted = false;
+
+      if (isDebugMode) {
+        console.error(
+          "[AudioManager] enumerateAudioDevices failed:",
+          error.message,
+        );
+      }
+
+      return {
+        success: false,
+        devices: [],
+        hasPermission: false,
+        error: error.message,
+      };
+    } finally {
+      // Always stop tracks to prevent stream leak
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+    }
+  }
+
+  /**
+   * Force re-enumeration of audio devices (refreshes cache)
+   * Call this when device changes are detected or expected
+   * @returns {Promise<{success: boolean, devices: Array, hasPermission: boolean, error?: string}>}
+   */
+  async refreshDevices() {
+    // Reset enumeration flag to force re-enumeration
+    this.hasEnumeratedDevices = false;
+    return await this.enumerateAudioDevices();
+  }
+
+  /**
+   * Set up device change listener to automatically refresh device cache
+   * @returns {Function} Cleanup function to remove listener
+   */
+  setupDeviceChangeListener() {
+    if (!navigator.mediaDevices) {
+      return () => {};
+    }
+
+    const handleDeviceChange = async () => {
+      if (isDebugMode) {
+        console.log("[AudioManager] Device change detected, refreshing cache");
+      }
+      await this.refreshDevices();
+    };
+
+    navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
+
+    // Return cleanup function
+    return () => {
+      navigator.mediaDevices.removeEventListener(
+        "devicechange",
+        handleDeviceChange,
+      );
+    };
   }
 
   // Get silence settings from localStorage
@@ -792,7 +890,42 @@ class AudioManager {
         return false;
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Check devices first
+      if (!this.hasEnumeratedDevices) {
+        await this.enumerateAudioDevices();
+      }
+
+      if (this.availableDevices.length === 0) {
+        throw new Error(
+          "No audio input devices found. Please connect a microphone.",
+        );
+      }
+
+      // Get selected device from localStorage
+      const selectedDevice =
+        localStorage.getItem("selectedInputDevice") || "default";
+
+      // Validate that the selected device still exists
+      const deviceExists =
+        selectedDevice === "default" ||
+        this.availableDevices.some((d) => d.deviceId === selectedDevice);
+
+      // Build constraints with selected device (fallback to default if device doesn't exist)
+      const constraints =
+        selectedDevice !== "default" && deviceExists
+          ? { audio: { deviceId: { exact: selectedDevice } } }
+          : { audio: true };
+
+      if (isDebugMode) {
+        console.log("[AudioManager] startRecording with constraints:", {
+          selectedDevice,
+          deviceExists,
+          constraints,
+          availableDevices: this.availableDevices.length,
+        });
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
 
       this.mediaRecorder = new MediaRecorder(stream);
       this.audioChunks = [];

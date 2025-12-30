@@ -1,4 +1,6 @@
 const { app, globalShortcut, BrowserWindow, dialog } = require("electron");
+const path = require("path");
+const fs = require("fs");
 
 // Enable transparent windows on Linux (native Wayland)
 if (process.platform === "linux") {
@@ -69,6 +71,26 @@ function setupProductionPath() {
 
 // Set up PATH before initializing managers
 setupProductionPath();
+
+/**
+ * Reads the startMinimized setting from user storage
+ * @returns {boolean} True if app should start minimized to tray
+ */
+function getStartMinimizedSetting() {
+  let startMinimized = false;
+  try {
+    const storagePath = path.join(app.getPath("userData"), "storage");
+    const settingsPath = path.join(storagePath, "settings.json");
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+      startMinimized =
+        settings.startMinimized === "true" || settings.startMinimized === true;
+    }
+  } catch (error) {
+    console.error("Could not read startMinimized setting:", error.message);
+  }
+  return startMinimized;
+}
 
 // Parse CLI arguments - whitelist allowed arguments for security
 const ALLOWED_CLI_ARGS = ["--toggle", "--debug", "--dev"];
@@ -198,7 +220,8 @@ async function startApp() {
 
   // Create control panel window
   try {
-    await windowManager.createControlPanelWindow();
+    const startMinimized = getStartMinimizedSetting();
+    await windowManager.createControlPanelWindow(startMinimized);
   } catch (error) {
     console.error("Error creating control panel window:", error);
   }
@@ -210,7 +233,7 @@ async function startApp() {
   );
   trayManager.setWindowManager(windowManager);
   trayManager.setCreateControlPanelCallback(() =>
-    windowManager.createControlPanelWindow(),
+    windowManager.createControlPanelWindow(getStartMinimizedSetting()),
   );
   await trayManager.createTray();
 
@@ -290,7 +313,8 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     if (windowManager) {
       windowManager.createMainWindow();
-      windowManager.createControlPanelWindow();
+      // Respect startMinimized when recreating windows after all are closed
+      windowManager.createControlPanelWindow(getStartMinimizedSetting());
     }
   } else {
     // Show control panel when dock icon is clicked (most common user action)
@@ -302,8 +326,8 @@ app.on("activate", () => {
       windowManager.controlPanelWindow.show();
       windowManager.controlPanelWindow.focus();
     } else if (windowManager) {
-      // If control panel doesn't exist, create it
-      windowManager.createControlPanelWindow();
+      // If control panel doesn't exist, create it and show (user action)
+      windowManager.createControlPanelWindow(false);
     }
 
     // Ensure dictation panel maintains its always-on-top status

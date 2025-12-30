@@ -18,6 +18,8 @@ import { ConfirmDialog, AlertDialog } from "./ui/dialog";
 import {
   useSettings,
   useFeedbackSettings,
+  useAudioDeviceSettings,
+  useGeneralSettings,
   SOUND_OPTIONS,
   type AudioFeedbackSound,
 } from "../hooks/useSettings";
@@ -131,6 +133,59 @@ export default function SettingsPage({
     }
   }, []);
 
+  // Load available audio devices when transcription section is active
+  useEffect(() => {
+    const loadDevices = async () => {
+      try {
+        // Only enumerate devices (don't prompt for permission)
+        // Permission should have already been granted during initial setup
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        setAvailableInputDevices(
+          devices
+            .filter((d) => d.kind === "audioinput")
+            .map((d) => ({
+              deviceId: d.deviceId,
+              label: d.label || `Microphone ${d.deviceId.slice(0, 8)}...`,
+            })),
+        );
+        setAvailableOutputDevices(
+          devices
+            .filter((d) => d.kind === "audiooutput")
+            .map((d) => ({
+              deviceId: d.deviceId,
+              label: d.label || `Speakers ${d.deviceId.slice(0, 8)}...`,
+            })),
+        );
+      } catch (error) {
+        console.error("Failed to enumerate devices:", error);
+      }
+    };
+
+    // Listen for device changes (always set up, only load when on transcription section)
+    const handleDeviceChange = () => {
+      if (activeSection === "transcription") {
+        loadDevices();
+      }
+    };
+
+    navigator.mediaDevices?.addEventListener(
+      "devicechange",
+      handleDeviceChange,
+    );
+
+    // Load devices immediately if on transcription section
+    if (activeSection === "transcription") {
+      loadDevices();
+    }
+
+    return () => {
+      navigator.mediaDevices?.removeEventListener(
+        "devicechange",
+        handleDeviceChange,
+      );
+    };
+  }, [activeSection]);
+
   const cachePathHint =
     typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent)
       ? "%USERPROFILE%\\.cache\\openwhispr\\models"
@@ -160,7 +215,25 @@ export default function SettingsPage({
     soundOnError,
     setSoundOnError,
   } = useFeedbackSettings();
+
+  const {
+    selectedInputDevice,
+    selectedOutputDevice,
+    setSelectedInputDevice,
+    setSelectedOutputDevice,
+  } = useAudioDeviceSettings();
+
+  const { startMinimized, setStartMinimized } = useGeneralSettings();
+
   const installTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Available audio devices state
+  const [availableInputDevices, setAvailableInputDevices] = useState<
+    Array<{ deviceId: string; label: string }>
+  >([]);
+  const [availableOutputDevices, setAvailableOutputDevices] = useState<
+    Array<{ deviceId: string; label: string }>
+  >([]);
 
   const subscribeToUpdates = useCallback(() => {
     if (!window.electronAPI) return () => {};
@@ -769,6 +842,38 @@ export default function SettingsPage({
                 )}
               </div>
             </div>
+
+            {/* Startup Section */}
+            <div className="border-t pt-8">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                  Startup Options
+                </h3>
+                <p className="text-sm text-gray-600 mb-6">
+                  Configure how OpenWhispr behaves when you first launch the
+                  app.
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                {/* Start Minimized Toggle */}
+                <div className="flex items-center justify-between py-3">
+                  <div>
+                    <div className="font-medium text-gray-900">
+                      Start minimized
+                    </div>
+                    <div className="text-sm text-gray-500">
+                      Launch app minimized to system tray on startup
+                    </div>
+                  </div>
+                  <Toggle
+                    checked={startMinimized}
+                    onChange={setStartMinimized}
+                  />
+                </div>
+              </div>
+            </div>
+
             {/* Hotkey Section */}
             <div className="border-t pt-8">
               <div>
@@ -1355,6 +1460,90 @@ export default function SettingsPage({
                     });
                   }}
                 />
+              </div>
+            </div>
+
+            {/* Audio Device Selection */}
+            <div className="space-y-4 p-4 bg-gray-50 border border-gray-200 rounded-xl">
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="font-medium text-gray-900">Audio Devices</h4>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={async () => {
+                    try {
+                      await navigator.mediaDevices.getUserMedia({
+                        audio: true,
+                      });
+                      const devices =
+                        await navigator.mediaDevices.enumerateDevices();
+                      setAvailableInputDevices(
+                        devices
+                          .filter((d) => d.kind === "audioinput")
+                          .map((d) => ({
+                            deviceId: d.deviceId,
+                            label:
+                              d.label ||
+                              `Microphone ${d.deviceId.slice(0, 8)}...`,
+                          })),
+                      );
+                      setAvailableOutputDevices(
+                        devices
+                          .filter((d) => d.kind === "audiooutput")
+                          .map((d) => ({
+                            deviceId: d.deviceId,
+                            label:
+                              d.label ||
+                              `Speakers ${d.deviceId.slice(0, 8)}...`,
+                          })),
+                      );
+                    } catch (error) {
+                      console.error("Failed to refresh devices:", error);
+                    }
+                  }}
+                >
+                  <RefreshCw className="h-4 w-4 mr-1" />
+                  Refresh
+                </Button>
+              </div>
+
+              {/* Input Device */}
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Microphone (Input)
+                </label>
+                <select
+                  value={selectedInputDevice}
+                  onChange={(e) => setSelectedInputDevice(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                >
+                  <option value="default">System Default</option>
+                  {availableInputDevices.map((device) => (
+                    <option key={device.deviceId} value={device.deviceId}>
+                      {device.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Output Device */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Speakers (Output for audio feedback)
+                </label>
+                <select
+                  value={selectedOutputDevice}
+                  onChange={(e) => setSelectedOutputDevice(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                >
+                  <option value="default">System Default</option>
+                  {availableOutputDevices.map((device) => (
+                    <option key={device.deviceId} value={device.deviceId}>
+                      {device.label}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
 
