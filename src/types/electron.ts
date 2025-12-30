@@ -320,6 +320,11 @@ declare global {
 
       // Settings management (used by OnboardingFlow but not in preload.js)
       saveSettings?: (settings: SaveSettings) => Promise<void>;
+      showControlPanel?: () => Promise<void>;
+      initializeWhisperSettings?: (settings: {
+        useLocalWhisper: boolean;
+        whisperModel: string;
+      }) => Promise<{ success: boolean; error?: string }>;
 
       // External URL operations
       openExternal: (

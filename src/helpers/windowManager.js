@@ -146,39 +146,32 @@ class WindowManager {
     return await this.dragManager.stopWindowDrag();
   }
 
-  async createControlPanelWindow(startMinimized = false) {
+  /**
+   * Creates or focuses the control panel window.
+   * - If window exists: restores, shows, and focuses it (for user-initiated actions)
+   * - If window doesn't exist: creates hidden window (React will show based on settings)
+   */
+  async createControlPanelWindow() {
     if (this.controlPanelWindow && !this.controlPanelWindow.isDestroyed()) {
+      // Window exists - restore and focus (user-initiated action)
       if (this.controlPanelWindow.isMinimized()) {
         this.controlPanelWindow.restore();
       }
-      // Respect startMinimized when window already exists
-      if (!startMinimized) {
-        if (!this.controlPanelWindow.isVisible()) {
-          this.controlPanelWindow.show();
-        }
-        this.controlPanelWindow.focus();
-      } else if (this.controlPanelWindow.isVisible()) {
-        // If starting minimized but window is visible, hide it
-        this.controlPanelWindow.hide();
+      if (!this.controlPanelWindow.isVisible()) {
+        this.controlPanelWindow.show();
       }
+      this.controlPanelWindow.focus();
       return;
     }
 
+    // Create new window - starts hidden, React decides visibility based on settings
     this.controlPanelWindow = new BrowserWindow(CONTROL_PANEL_CONFIG);
 
     this.controlPanelWindow.once("ready-to-show", () => {
       if (process.platform === "win32") {
         this.controlPanelWindow.setSkipTaskbar(false);
       }
-
-      // Only show if NOT starting minimized
-      if (!startMinimized) {
-        this.controlPanelWindow.show();
-        this.controlPanelWindow.focus();
-      } else {
-        // Start minimized - hide to tray instead
-        this.controlPanelWindow.hide();
-      }
+      // Window starts hidden - React will show it if startMinimized is false
     });
 
     this.controlPanelWindow.on("show", () => {

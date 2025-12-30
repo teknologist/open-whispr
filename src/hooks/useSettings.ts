@@ -172,10 +172,17 @@ export function useFeedbackSettings() {
 // Valid Whisper model names (whitelist for security)
 const VALID_WHISPER_MODELS = [
   "tiny",
+  "tiny.en",
   "base",
+  "base.en",
   "small",
+  "small.en",
   "medium",
+  "medium.en",
   "large",
+  "large-v1",
+  "large-v2",
+  "large-v3",
   "turbo",
   "distil-small.en",
   "distil-medium.en",

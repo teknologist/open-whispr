@@ -1,6 +1,6 @@
 {
   "name": "open-whispr",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "description": "A desktop dictation application using OpenAI Whisper for speech-to-text transcription",
   "homepage": "https://github.com/openwhispr/open-whispr",
   "main": "main.js",

@@ -72,26 +72,6 @@ function setupProductionPath() {
 // Set up PATH before initializing managers
 setupProductionPath();
 
-/**
- * Reads the startMinimized setting from user storage
- * @returns {boolean} True if app should start minimized to tray
- */
-function getStartMinimizedSetting() {
-  let startMinimized = false;
-  try {
-    const storagePath = path.join(app.getPath("userData"), "storage");
-    const settingsPath = path.join(storagePath, "settings.json");
-    if (fs.existsSync(settingsPath)) {
-      const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-      startMinimized =
-        settings.startMinimized === "true" || settings.startMinimized === true;
-    }
-  } catch (error) {
-    console.error("Could not read startMinimized setting:", error.message);
-  }
-  return startMinimized;
-}
-
 // Parse CLI arguments - whitelist allowed arguments for security
 const ALLOWED_CLI_ARGS = ["--toggle", "--debug", "--dev"];
 const cliArgs = process.argv.filter((arg) => ALLOWED_CLI_ARGS.includes(arg));
@@ -218,10 +198,9 @@ async function startApp() {
     console.error("Error creating main window:", error);
   }
 
-  // Create control panel window
+  // Create control panel window (starts hidden, React will show it based on settings)
   try {
-    const startMinimized = getStartMinimizedSetting();
-    await windowManager.createControlPanelWindow(startMinimized);
+    await windowManager.createControlPanelWindow();
   } catch (error) {
     console.error("Error creating control panel window:", error);
   }
@@ -233,7 +212,7 @@ async function startApp() {
   );
   trayManager.setWindowManager(windowManager);
   trayManager.setCreateControlPanelCallback(() =>
-    windowManager.createControlPanelWindow(getStartMinimizedSetting()),
+    windowManager.createControlPanelWindow(),
   );
   await trayManager.createTray();
 
@@ -314,7 +293,7 @@ app.on("activate", () => {
     if (windowManager) {
       windowManager.createMainWindow();
       // Respect startMinimized when recreating windows after all are closed
-      windowManager.createControlPanelWindow(getStartMinimizedSetting());
+      windowManager.createControlPanelWindow();
     }
   } else {
     // Show control panel when dock icon is clicked (most common user action)
@@ -326,8 +305,21 @@ app.on("activate", () => {
       windowManager.controlPanelWindow.show();
       windowManager.controlPanelWindow.focus();
     } else if (windowManager) {
-      // If control panel doesn't exist, create it and show (user action)
-      windowManager.createControlPanelWindow(false);
+      // If control panel doesn't exist, create it and show (user clicked dock icon)
+      windowManager
+        .createControlPanelWindow()
+        .then(() => {
+          if (
+            windowManager.controlPanelWindow &&
+            !windowManager.controlPanelWindow.isDestroyed()
+          ) {
+            windowManager.controlPanelWindow.show();
+            windowManager.controlPanelWindow.focus();
+          }
+        })
+        .catch((error) => {
+          console.error("Failed to create control panel window:", error);
+        });
     }
 
     // Ensure dictation panel maintains its always-on-top status

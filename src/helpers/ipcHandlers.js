@@ -109,6 +109,32 @@ class IPCHandlers {
       return { success: true };
     });
 
+    // Show control panel window (called by React after checking startMinimized)
+    ipcMain.handle("show-control-panel", () => {
+      const controlPanel = this.windowManager.controlPanelWindow;
+      if (controlPanel && !controlPanel.isDestroyed()) {
+        controlPanel.show();
+        controlPanel.focus();
+      }
+    });
+
+    // Initialize whisper with settings from renderer
+    ipcMain.handle("initialize-whisper-settings", async (event, settings) => {
+      try {
+        const { useLocalWhisper, whisperModel } = settings;
+        if (useLocalWhisper && whisperModel) {
+          await this.whisperManager.initializeAtStartup({
+            useLocalWhisper,
+            whisperModel,
+          });
+        }
+        return { success: true };
+      } catch (error) {
+        console.error("Failed to initialize whisper:", error);
+        return { success: false, error: error.message };
+      }
+    });
+
     // Feedback settings handlers
     ipcMain.handle("set-hide-indicator-window", (event, hide) => {
       this.windowManager.setHideIndicatorWindow(Boolean(hide));

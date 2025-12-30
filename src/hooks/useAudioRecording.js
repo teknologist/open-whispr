@@ -10,6 +10,7 @@ export const useAudioRecording = (toast, options = {}) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [transcript, setTranscript] = useState("");
   const audioManagerRef = useRef(null);
+  const wasRecordingRef = useRef(false); // Track previous recording state for sound triggers
   const onToggleRef = useRef(options.onToggle);
   const toastRef = useRef(toast);
 
@@ -30,9 +31,33 @@ export const useAudioRecording = (toast, options = {}) => {
       audioManagerRef.current = new AudioManager();
     }
 
+    // Helper to play transition sounds
+    const playTransitionSound = (settingKey, defaultSound) => {
+      const audioFeedbackEnabled =
+        localStorage.getItem("audioFeedbackEnabled") === "true";
+      if (!audioFeedbackEnabled) return;
+
+      const sound = localStorage.getItem(settingKey) || defaultSound;
+      if (sound !== "none") {
+        window.electronAPI?.playAudioFeedback?.(sound);
+      }
+    };
+
     // Set up callbacks (using refs to always have latest values)
     audioManagerRef.current.setCallbacks({
       onStateChange: ({ isRecording, isProcessing }) => {
+        const wasRecording = wasRecordingRef.current;
+
+        // Play record start/stop sounds
+        if (isRecording && !wasRecording) {
+          playTransitionSound("soundOnRecordStart", "bubble");
+        } else if (!isRecording && wasRecording && !isProcessing) {
+          playTransitionSound("soundOnRecordStop", "tap");
+        }
+
+        // Track previous state for next comparison
+        wasRecordingRef.current = isRecording;
+
         setIsRecording(isRecording);
         setIsProcessing(isProcessing);
 

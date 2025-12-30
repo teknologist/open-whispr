@@ -28,7 +28,9 @@ export default function ControlPanel() {
     updateDownloaded: false,
     isDevelopment: false,
   });
-  const isWindows = typeof window !== "undefined" && window.electronAPI?.getPlatform?.() === "win32";
+  const isWindows =
+    typeof window !== "undefined" &&
+    window.electronAPI?.getPlatform?.() === "win32";
 
   const {
     confirmDialog,
@@ -44,6 +46,38 @@ export default function ControlPanel() {
   };
 
   useEffect(() => {
+    // Initialize app settings
+    const initializeAppSettings = async () => {
+      try {
+        // Show window based on startMinimized setting
+        const startMinimized =
+          localStorage.getItem("startMinimized") === "true";
+        if (!startMinimized) {
+          await window.electronAPI?.showControlPanel?.();
+        }
+
+        // Initialize whisper with saved settings
+        const useLocalWhisper =
+          localStorage.getItem("useLocalWhisper") === "true";
+        const whisperModel = localStorage.getItem("whisperModel") || "base";
+        if (useLocalWhisper) {
+          const result = await window.electronAPI?.initializeWhisperSettings?.({
+            useLocalWhisper,
+            whisperModel,
+          });
+          if (result && !result.success) {
+            console.warn(
+              "Failed to initialize Whisper settings:",
+              result.error,
+            );
+          }
+        }
+      } catch (error) {
+        console.error("Failed to initialize app settings:", error);
+      }
+    };
+
+    initializeAppSettings();
     loadTranscriptions();
 
     // Initialize update status

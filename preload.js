@@ -72,6 +72,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Settings management
   saveSettings: (settings) => ipcRenderer.invoke("save-settings", settings),
+  showControlPanel: () => ipcRenderer.invoke("show-control-panel"),
+  initializeWhisperSettings: (settings) =>
+    ipcRenderer.invoke("initialize-whisper-settings", settings),
 
   // Clipboard functions
   readClipboard: () => ipcRenderer.invoke("read-clipboard"),
