@@ -36,10 +36,18 @@ const AMBIENT_CALIBRATION_SAMPLES = Math.ceil(
   AMBIENT_CALIBRATION_MS / SILENCE_CHECK_INTERVAL_MS,
 ); // ~8 samples
 const AMBIENT_SKIP_INITIAL_SAMPLES = 2; // Skip first 2 samples (hotkey click noise)
-const SPEECH_TO_AMBIENT_RATIO = 2.5; // Speech must be 2.5x louder than ambient to be detected
-const SILENCE_TO_AMBIENT_RATIO = 1.3; // Audio must drop to within 1.3x of ambient to be "silence"
-const MAX_ACCEPTABLE_AMBIENT_RMS = 0.15; // Reject environments noisier than this (~15% of full scale)
-const MIN_AMBIENT_RMS = 0.003; // Floor for ambient noise (handles very quiet environments)
+const SPEECH_TO_AMBIENT_RATIO = 1.05; // Speech must be 5% above ambient (1.05x) to be detected
+const SILENCE_TO_AMBIENT_RATIO = 1.05; // Audio must drop to within 5% of ambient to be "silence"
+const SPEECH_END_CONFIRMATION_TICKS = 5; // Require 5 consecutive silence readings (1 second) before stopping
+const MAX_ACCEPTABLE_AMBIENT_RMS = 0.02; // Lower max to detect when calibration fails (was 0.15)
+const MIN_AMBIENT_RMS = 0.002; // Floor for ambient noise (handles very quiet environments)
+const MIN_SPEECH_RMS = 0.006; // Minimum absolute RMS for speech detection (lowered for quiet speech)
+const SPEECH_START_CONFIRMATION_TICKS = 2; // Require 2 consecutive speech readings to confirm speech started
+const MAX_SPEECH_RMS_WINDOW = 10; // Number of ticks to track peak speech volume (2 seconds)
+const SPEECH_END_DIP_THRESHOLD = 0.6; // Silence detected when RMS drops to 60% of recent peak
+const FIXED_SPEECH_THRESHOLD = 0.008; // Fixed threshold when ambient is unreliable (works consistently)
+const FIXED_SILENCE_THRESHOLD = 0.005; // Fixed silence threshold (absolute)
+const AMBIENT_UNRELIABLE_THRESHOLD = 0.008; // Use fixed thresholds when ambient exceeds this (lowered from 0.02)
 
 class AudioManager {
   constructor() {
@@ -64,20 +72,28 @@ class AudioManager {
     this.silenceStartTime = null;
     this.hasDetectedSpeech = false; // Only stop after speech has been detected
     this.cachedSilenceSettings = null; // Cache to avoid repeated localStorage reads
+    this._consecutiveSilenceTicks = 0; // Consecutive readings below silence threshold
+    this._consecutiveSpeechTicks = 0; // Consecutive readings above speech threshold
+    this._recentRmsValues = []; // Track recent RMS values for peak-based silence detection
+    this._peakSpeechRms = 0; // Peak RMS during current speech segment
 
     // Adaptive ambient noise calibration
     this.ambientCalibrationSamples = []; // RMS samples during calibration
     this.ambientNoiseLevel = null; // Calculated ambient noise level
     this.isCalibrating = true; // Whether we're still in calibration phase
     this.ambientTooLoud = false; // Flag if environment is too noisy
+    this.useBackgroundNoiseDetection = true; // Whether to use ambient calibration (default true)
 
     // Atomic state flag to prevent race conditions during stop
     this._isStopping = false;
 
     // Debug logging flags
     this._firstCheckLogged = false;
+    this._checkCounter = 0;
     this._ambientTooLoudLogged = false;
+    this._ambientWarningLogged = false; // Track if we warned about unreliable ambient
     this._debugLogCounter = 0;
+    this._intervalErrorCount = 0; // Track consecutive interval errors
   }
 
   // Get silence settings from localStorage
@@ -86,11 +102,16 @@ class AudioManager {
     const threshold =
       parseInt(localStorage.getItem("silenceThreshold"), 10) ||
       DEFAULT_SILENCE_THRESHOLD_MS;
-    return { enabled, threshold };
+    const useBackgroundNoiseDetection =
+      localStorage.getItem("useBackgroundNoiseDetection") !== "false"; // Default true
+    return { enabled, threshold, useBackgroundNoiseDetection };
   }
 
   // Check if current audio level is silence using adaptive RMS threshold
   checkAudioLevel() {
+    // Counter to track all interval calls (not just calibration)
+    this._checkCounter++;
+
     // Debug: log first call to verify interval is running
     if (!this._firstCheckLogged) {
       this._firstCheckLogged = true;
@@ -112,16 +133,41 @@ class AudioManager {
       });
     }
 
+    // Log every 5th call to track interval health without spamming
+    if (this._checkCounter % 5 === 0) {
+      if (isDebugMode) {
+        window.electronAPI?.logReasoning?.("SILENCE_INTERVAL_TICK", {
+          tickNumber: this._checkCounter,
+          isCalibrating: this.isCalibrating,
+          sampleCount: this.ambientCalibrationSamples.length,
+          hasAnalyser: !!this.analyser,
+          isRecording: this.isRecording,
+          ambientNoiseLevel: this.ambientNoiseLevel?.toFixed(4),
+          peakRms: this._peakSpeechRms.toFixed(4),
+          consecutiveSilenceTicks: this._consecutiveSilenceTicks,
+          consecutiveSpeechTicks: this._consecutiveSpeechTicks,
+          hasDetectedSpeech: this.hasDetectedSpeech,
+        });
+      }
+    }
+
     // Log each check during calibration to see what's happening
     if (this.isCalibrating) {
       if (isDebugMode) {
         console.log("[AudioManager] Calibration tick:", {
+          tick: this._checkCounter,
           sampleCount: this.ambientCalibrationSamples.length,
           targetSamples: AMBIENT_CALIBRATION_SAMPLES,
           hasAnalyser: !!this.analyser,
           isRecording: this.isRecording,
         });
       }
+      // Also log via IPC for calibration ticks (important for debugging)
+      window.electronAPI?.logReasoning?.("CALIBRATION_TICK", {
+        tick: this._checkCounter,
+        sampleCount: this.ambientCalibrationSamples.length,
+        targetSamples: AMBIENT_CALIBRATION_SAMPLES,
+      });
     }
 
     if (!this.analyser || !this.isRecording) {
@@ -241,8 +287,42 @@ class AudioManager {
     }
 
     // --- Active silence detection with adaptive threshold ---
-    const speechThreshold = this.ambientNoiseLevel * SPEECH_TO_AMBIENT_RATIO;
-    const silenceThreshold = this.ambientNoiseLevel * SILENCE_TO_AMBIENT_RATIO;
+    // Check if ambient calibration is unreliable (too high)
+    const ambientUnreliable =
+      this.ambientNoiseLevel > AMBIENT_UNRELIABLE_THRESHOLD;
+
+    // Always use fixed thresholds when background detection is disabled
+    const forceFixedThresholds = !this.useBackgroundNoiseDetection;
+
+    // Use fixed thresholds when ambient is unreliable or background detection disabled
+    const speechThreshold =
+      ambientUnreliable || forceFixedThresholds
+        ? FIXED_SPEECH_THRESHOLD
+        : this.ambientNoiseLevel * SPEECH_TO_AMBIENT_RATIO;
+
+    const silenceThreshold =
+      ambientUnreliable || forceFixedThresholds
+        ? FIXED_SILENCE_THRESHOLD
+        : this.ambientNoiseLevel * SILENCE_TO_AMBIENT_RATIO;
+
+    // Warn once if using fixed thresholds (calibration unreliable)
+    if (ambientUnreliable && !this._ambientWarningLogged) {
+      this._ambientWarningLogged = true;
+      if (isDebugMode) {
+        console.warn(
+          "[AudioManager] Ambient calibration unreliable (",
+          this.ambientNoiseLevel.toFixed(4),
+          "), using fixed thresholds:",
+        );
+      }
+      window.electronAPI?.logReasoning?.("AMBIENT_UNRELIABLE", {
+        ambientLevel: this.ambientNoiseLevel.toFixed(4),
+        threshold: AMBIENT_UNRELIABLE_THRESHOLD,
+        usingFixedThreshold: true,
+        fixedSpeechThreshold: FIXED_SPEECH_THRESHOLD,
+        fixedSilenceThreshold: FIXED_SILENCE_THRESHOLD,
+      });
+    }
 
     // Debug log every 3 seconds to avoid spam (every 30 checks at 100ms interval)
     if (!this._debugLogCounter) this._debugLogCounter = 0;
@@ -266,15 +346,65 @@ class AudioManager {
       window.electronAPI?.logReasoning?.("AUDIO_LEVEL_CHECK", logData);
     }
 
-    // Check for silence (audio dropped back near ambient level)
-    if (rms < silenceThreshold) {
-      // Currently silence (relative to ambient)
-      if (!this.silenceStartTime) {
-        this.silenceStartTime = Date.now();
-      } else if (this.hasDetectedSpeech) {
-        // Only auto-stop after we've detected some speech
-        const silenceDuration = Date.now() - this.silenceStartTime;
-        if (silenceDuration >= threshold) {
+    // Track recent RMS values and update peak
+    this._recentRmsValues.push(rms);
+    if (this._recentRmsValues.length > MAX_SPEECH_RMS_WINDOW) {
+      this._recentRmsValues.shift();
+    }
+
+    // Update peak speech RMS (only after speech detected)
+    if (this.hasDetectedSpeech && rms > this._peakSpeechRms) {
+      this._peakSpeechRms = rms;
+    }
+
+    // Check for silence using HYBRID approach:
+    // 1. RMS dropped significantly below recent peak (peak-based), OR
+    // 2. RMS dropped below ambient threshold (ambient-based)
+    const peakBasedThreshold = this._peakSpeechRms * SPEECH_END_DIP_THRESHOLD;
+    const isBelowPeakThreshold =
+      this._peakSpeechRms > 0 && rms < peakBasedThreshold;
+    const isBelowAmbientThreshold = rms < silenceThreshold;
+
+    if (isDebugMode && this._consecutiveSilenceTicks <= 15) {
+      console.log("[AudioManager] Silence check:", {
+        rms: rms.toFixed(4),
+        ambientThreshold: silenceThreshold.toFixed(4),
+        peakThreshold: peakBasedThreshold.toFixed(4),
+        peakRms: this._peakSpeechRms.toFixed(4),
+        isBelowPeak: isBelowPeakThreshold,
+        isBelowAmbient: isBelowAmbientThreshold,
+      });
+    }
+
+    // Use consecutive readings to prevent timer reset on threshold oscillation
+    if (isBelowPeakThreshold || isBelowAmbientThreshold) {
+      // Currently silence (either below peak dip threshold OR below ambient)
+      // Only count silence after speech has been detected - prevents counting
+      // "silence" during the calibration/pre-speech period
+      if (this.hasDetectedSpeech) {
+        this._consecutiveSilenceTicks++;
+
+        if (isDebugMode && this._consecutiveSilenceTicks <= 15) {
+          console.log("[AudioManager] Silence tick:", {
+            tick: this._consecutiveSilenceTicks,
+            rms: rms.toFixed(4),
+            peakThreshold: peakBasedThreshold.toFixed(4),
+            ambientThreshold: silenceThreshold.toFixed(4),
+            trigger: isBelowPeakThreshold ? "peak" : "ambient",
+          });
+        }
+
+        // Calculate silence duration from consecutive ticks
+        const silenceDuration =
+          this._consecutiveSilenceTicks * SILENCE_CHECK_INTERVAL_MS;
+
+        // Require minimum confirmation ticks AND user threshold
+        const requiredTicks = Math.max(
+          SPEECH_END_CONFIRMATION_TICKS,
+          Math.ceil(threshold / SILENCE_CHECK_INTERVAL_MS),
+        );
+
+        if (this._consecutiveSilenceTicks >= requiredTicks) {
           // Atomic check-and-set to prevent race conditions
           if (this._isStopping) {
             return; // Already stopping, don't trigger again
@@ -285,13 +415,26 @@ class AudioManager {
             console.log(
               "[AudioManager] Auto-stopping due to silence after",
               silenceDuration,
-              "ms (ambient:",
+              "ms (",
+              this._consecutiveSilenceTicks,
+              " ticks, ambient:",
               this.ambientNoiseLevel?.toFixed(4),
+              ", peakRms:",
+              this._peakSpeechRms.toFixed(4),
               ", current:",
               rms.toFixed(4),
               ")",
             );
           }
+          window.electronAPI?.logReasoning?.("SILENCE_AUTO_STOP", {
+            silenceDuration,
+            consecutiveTicks: this._consecutiveSilenceTicks,
+            requiredTicks,
+            ambientLevel: this.ambientNoiseLevel?.toFixed(4),
+            peakRms: this._peakSpeechRms.toFixed(4),
+            currentRms: rms.toFixed(4),
+            trigger: isBelowPeakThreshold ? "peak" : "ambient",
+          });
           // Clear interval first to prevent re-triggering
           if (this.silenceCheckInterval) {
             clearInterval(this.silenceCheckInterval);
@@ -304,20 +447,67 @@ class AudioManager {
         }
       }
     } else {
-      // Not silence - reset timer
-      this.silenceStartTime = null;
-
-      // Detect speech (significantly above ambient)
-      if (rms > speechThreshold && !this.hasDetectedSpeech) {
+      // Not silence - reset consecutive tick counter
+      if (this._consecutiveSilenceTicks > 0) {
         if (isDebugMode) {
           console.log(
-            "[AudioManager] Speech detected, RMS:",
+            "[AudioManager] Reset silence ticks (was",
+            this._consecutiveSilenceTicks,
+            ") - RMS:",
             rms.toFixed(4),
-            "threshold:",
-            speechThreshold.toFixed(4),
+            "above threshold:",
+            silenceThreshold.toFixed(4),
           );
         }
-        this.hasDetectedSpeech = true;
+      }
+      this._consecutiveSilenceTicks = 0;
+
+      // Detect speech using consecutive readings for reliability
+      // Speech detected if EITHER:
+      // 1. RMS > 1.05x ambient (relative threshold), OR
+      // 2. RMS > MIN_SPEECH_RMS (absolute minimum of 0.006)
+      const isAboveSpeechThreshold = rms > speechThreshold;
+      const isAboveAbsoluteMin = rms > MIN_SPEECH_RMS;
+
+      if (isAboveSpeechThreshold || isAboveAbsoluteMin) {
+        this._consecutiveSpeechTicks++;
+
+        // Require consecutive readings to confirm speech (prevent false positives)
+        if (
+          !this.hasDetectedSpeech &&
+          this._consecutiveSpeechTicks >= SPEECH_START_CONFIRMATION_TICKS
+        ) {
+          this.hasDetectedSpeech = true;
+          if (isDebugMode) {
+            console.log(
+              "[AudioManager] Speech detected after",
+              this._consecutiveSpeechTicks,
+              "ticks, RMS:",
+              rms.toFixed(4),
+              "relative threshold:",
+              speechThreshold.toFixed(4),
+              "absolute minimum:",
+              MIN_SPEECH_RMS,
+              "ambient level:",
+              this.ambientNoiseLevel?.toFixed(4),
+              "trigger:",
+              isAboveSpeechThreshold ? "relative" : "absolute",
+            );
+          }
+          window.electronAPI?.logReasoning?.("SPEECH_DETECTED", {
+            consecutiveTicks: this._consecutiveSpeechTicks,
+            rms: rms.toFixed(4),
+            relativeThreshold: speechThreshold.toFixed(4),
+            absoluteThreshold: MIN_SPEECH_RMS,
+            ambientLevel: this.ambientNoiseLevel?.toFixed(4),
+            trigger: isAboveSpeechThreshold ? "relative" : "absolute",
+          });
+        }
+      } else {
+        // Below speech threshold - reset consecutive speech counter
+        if (this._consecutiveSpeechTicks > 0) {
+          this._consecutiveSpeechTicks = 0;
+        }
       }
     }
   }
@@ -353,6 +543,7 @@ class AudioManager {
 
     // Cache settings AFTER cleanup (stopSilenceDetection clears cachedSilenceSettings)
     this.cachedSilenceSettings = settings;
+    this.useBackgroundNoiseDetection = settings.useBackgroundNoiseDetection;
 
     try {
       this.audioContext = new (
@@ -383,20 +574,76 @@ class AudioManager {
       // Reset silence tracking
       this.silenceStartTime = null;
       this.hasDetectedSpeech = false;
+      this._consecutiveSilenceTicks = 0; // Reset consecutive silence counter
+      this._consecutiveSpeechTicks = 0; // Reset consecutive speech counter
+      this._recentRmsValues = []; // Reset recent RMS values
+      this._peakSpeechRms = 0; // Reset peak speech RMS
       this._firstCheckLogged = false; // Reset debug flag for new recording
+      this._checkCounter = 0; // Reset interval tick counter
       this._debugLogCounter = 0; // Reset counter
       this._isStopping = false; // Reset atomic stop flag
       this._ambientTooLoudLogged = false; // Reset debug flag for new recording
+      this._ambientWarningLogged = false; // Reset ambient warning flag
+      this._intervalErrorCount = 0; // Reset error counter for new recording
 
       // Reset ambient calibration for new recording
       this.ambientCalibrationSamples = [];
-      this.ambientNoiseLevel = null;
-      this.isCalibrating = true;
-      this.ambientTooLoud = false;
+
+      if (this.useBackgroundNoiseDetection) {
+        // Full calibration (existing behavior)
+        this.ambientNoiseLevel = null;
+        this.isCalibrating = true;
+        this.ambientTooLoud = false;
+      } else {
+        // Skip calibration, use fixed thresholds directly
+        this.ambientNoiseLevel = null; // Keep null to indicate calibration was skipped
+        this.isCalibrating = false;
+        this.ambientTooLoud = false;
+
+        if (isDebugMode) {
+          console.log(
+            "[AudioManager] Background noise detection disabled, using fixed thresholds",
+          );
+        }
+        window.electronAPI?.logReasoning?.("CALIBRATION_SKIPPED", {
+          usingFixedThreshold: true,
+          fixedSpeechThreshold: FIXED_SPEECH_THRESHOLD,
+          fixedSilenceThreshold: FIXED_SILENCE_THRESHOLD,
+        });
+      }
 
       // Start checking audio levels
+      // Wrap in try-catch to prevent silent failures
       this.silenceCheckInterval = setInterval(() => {
-        this.checkAudioLevel();
+        try {
+          this.checkAudioLevel();
+          this._intervalErrorCount = 0; // Reset on success
+        } catch (error) {
+          this._intervalErrorCount++;
+          if (isDebugMode) {
+            console.error(
+              "[AudioManager] Error in silence check interval:",
+              error,
+            );
+          }
+          // Log error with count
+          window.electronAPI?.logReasoning?.("SILENCE_CHECK_ERROR", {
+            error: error.message,
+            stack: error.stack,
+            errorCount: this._intervalErrorCount,
+          });
+
+          // Stop interval if too many consecutive errors
+          if (this._intervalErrorCount > 10) {
+            clearInterval(this.silenceCheckInterval);
+            this.silenceCheckInterval = null;
+            this.onError?.({
+              title: "Silence Detection Error",
+              description:
+                "Auto-stop feature disabled due to repeated errors. Recording will continue normally.",
+            });
+          }
+        }
       }, SILENCE_CHECK_INTERVAL_MS);
 
       if (isDebugMode) {

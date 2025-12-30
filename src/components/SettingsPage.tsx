@@ -79,6 +79,7 @@ export default function SettingsPage({
     dictationKey,
     silenceAutoStop,
     silenceThreshold,
+    useBackgroundNoiseDetection,
     setUseLocalWhisper,
     setWhisperModel,
     setAllowOpenAIFallback,
@@ -97,6 +98,7 @@ export default function SettingsPage({
     setDictationKey,
     setSilenceAutoStop,
     setSilenceThreshold,
+    setUseBackgroundNoiseDetection,
     updateTranscriptionSettings,
     updateReasoningSettings,
     updateApiKeys,
@@ -1377,7 +1379,26 @@ export default function SettingsPage({
               </div>
 
               {silenceAutoStop && (
-                <div className="pt-4 border-t border-gray-200">
+                <div className="pt-4 border-t border-gray-200 space-y-4">
+                  {/* Background noise detection toggle */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-sm font-medium text-gray-700">
+                        Auto-detect background noise
+                      </span>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        Automatically measures ambient noise level for better
+                        speech detection. Disable for consistent fixed
+                        thresholds.
+                      </p>
+                    </div>
+                    <Toggle
+                      checked={useBackgroundNoiseDetection}
+                      onChange={setUseBackgroundNoiseDetection}
+                    />
+                  </div>
+
+                  {/* Silence threshold slider */}
                   <div className="flex items-center justify-between mb-2">
                     <label
                       htmlFor="silence-threshold"

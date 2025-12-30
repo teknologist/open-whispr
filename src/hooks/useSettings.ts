@@ -34,6 +34,7 @@ export interface ApiKeySettings {
 export interface SilenceSettings {
   silenceAutoStop: boolean;
   silenceThreshold: number; // 300-5000ms
+  useBackgroundNoiseDetection: boolean; // Use ambient calibration (800ms delay) or fixed thresholds
 }
 
 // Available audio feedback sounds
@@ -373,6 +374,16 @@ export function useSettings() {
     },
   );
 
+  const [useBackgroundNoiseDetection, setUseBackgroundNoiseDetection] =
+    useLocalStorage(
+      "useBackgroundNoiseDetection",
+      true, // Default true for backward compatibility
+      {
+        serialize: String,
+        deserialize: (value) => value !== "false", // Default true when undefined
+      },
+    );
+
   // Computed values
   const reasoningProvider = getModelProvider(reasoningModel);
 
@@ -437,8 +448,10 @@ export function useSettings() {
         setSilenceAutoStop(settings.silenceAutoStop);
       if (settings.silenceThreshold !== undefined)
         setSilenceThreshold(settings.silenceThreshold);
+      if (settings.useBackgroundNoiseDetection !== undefined)
+        setUseBackgroundNoiseDetection(settings.useBackgroundNoiseDetection);
     },
-    [setSilenceAutoStop, setSilenceThreshold],
+    [setSilenceAutoStop, setSilenceThreshold, setUseBackgroundNoiseDetection],
   );
 
   return {
@@ -491,8 +504,10 @@ export function useSettings() {
     setDictationKey,
     silenceAutoStop,
     silenceThreshold,
+    useBackgroundNoiseDetection,
     setSilenceAutoStop,
     setSilenceThreshold,
+    setUseBackgroundNoiseDetection,
     updateTranscriptionSettings,
     updateReasoningSettings,
     updateApiKeys,
