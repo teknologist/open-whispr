@@ -66,6 +66,7 @@ class AudioManager {
     // Note: API keys are not cached in renderer for security - fetched fresh each time
     this.cachedTranscriptionEndpoint = null;
     this.recordingStartTime = null;
+    this._stopRequestedAt = null;
     this.reasoningAvailabilityCache = { value: false, expiresAt: 0 };
     this.cachedReasoningPreference = null;
 
@@ -208,6 +209,25 @@ class AudioManager {
       DEFAULT_SILENCE_THRESHOLD_MS;
     const useBackgroundNoiseDetection =
       localStorage.getItem("useBackgroundNoiseDetection") !== "false"; // Default true
+
+    // Force-disable silence auto-stop for local Qwen ASR.
+    // Qwen path is fast enough and users reported better UX with manual stop.
+    const useLocalWhisper = localStorage.getItem("useLocalWhisper") === "true";
+    const asrProvider = localStorage.getItem("asrProvider") || "whisper";
+    const whisperModel = localStorage.getItem("whisperModel") || "base";
+    const isLocalQwen =
+      useLocalWhisper &&
+      (asrProvider === "qwen" || whisperModel.startsWith("qwen3-asr-"));
+
+    if (isLocalQwen) {
+      return {
+        enabled: false,
+        threshold,
+        useBackgroundNoiseDetection,
+        disabledReason: "qwen-provider",
+      };
+    }
+
     return { enabled, threshold, useBackgroundNoiseDetection };
   }
 
@@ -1070,14 +1090,22 @@ class AudioManager {
       this.mediaRecorder = new MediaRecorder(stream);
       this.audioChunks = [];
       this.recordingStartTime = Date.now();
+      this._stopRequestedAt = null;
 
       this.mediaRecorder.ondataavailable = (event) => {
         this.audioChunks.push(event.data);
       };
 
       this.mediaRecorder.onstop = async () => {
+        const onStopTimestamp = Date.now();
+        const stopRequestedAt = this._stopRequestedAt || onStopTimestamp;
+        const stopToOnStopMs = onStopTimestamp - stopRequestedAt;
+
         if (isDebugMode) {
-          console.log("[AudioManager] onstop callback triggered");
+          console.log("[AudioManager] onstop callback triggered", {
+            stopToOnStopMs,
+            hadStopRequestedAt: !!this._stopRequestedAt,
+          });
         }
 
         // Check if recording was cancelled (Escape key)
@@ -1088,6 +1116,7 @@ class AudioManager {
             );
           }
           this._cancelledRecording = false;
+          this._stopRequestedAt = null;
           this.isRecording = false;
           this.isProcessing = false;
           this.onStateChange?.({ isRecording: false, isProcessing: false });
@@ -1178,7 +1207,13 @@ class AudioManager {
             durationSeconds,
           );
         }
-        await this.processAudio(audioBlob, { durationSeconds });
+        await this.processAudio(audioBlob, {
+          durationSeconds,
+          stopRequestedAt,
+          stopToOnStopMs,
+          audioBlobBytes: audioBlob.size,
+        });
+        this._stopRequestedAt = null;
         if (isDebugMode) {
           console.log("[AudioManager] processAudio completed");
         }
@@ -1249,10 +1284,12 @@ class AudioManager {
     this.stopSilenceDetection().catch(() => {});
 
     if (this.mediaRecorder && this.isRecording) {
+      this._stopRequestedAt = Date.now();
       this.mediaRecorder.stop();
       // State change will be handled in onstop callback
       return true;
     }
+    this._stopRequestedAt = null;
     return false;
   }
 
@@ -1270,6 +1307,7 @@ class AudioManager {
 
     if (this.mediaRecorder && this.isRecording) {
       // Stop the media recorder - onstop will check _cancelledRecording flag
+      this._stopRequestedAt = Date.now();
       this.mediaRecorder.stop();
       return true;
     }
@@ -1387,10 +1425,15 @@ class AudioManager {
         console.log("[AudioManager] Calling transcribeLocalWhisper IPC...");
       }
 
+      const localTranscribeStartedAt = Date.now();
+      let localTranscribeMs = null;
+      let postProcessMs = 0;
+
       const result = await window.electronAPI.transcribeLocalWhisper(
         arrayBuffer,
         options,
       );
+      localTranscribeMs = Date.now() - localTranscribeStartedAt;
       if (isDebugMode) {
         console.log("[AudioManager] transcribeLocalWhisper IPC returned:", {
           success: result?.success,
@@ -1406,7 +1449,9 @@ class AudioManager {
             result.text.substring(0, 100),
           );
         }
+        const postProcessStartedAt = Date.now();
         const text = await this.processTranscription(result.text, "local");
+        postProcessMs = Date.now() - postProcessStartedAt;
         if (isDebugMode) {
           console.log(
             "[AudioManager] processTranscription returned:",
@@ -1414,6 +1459,36 @@ class AudioManager {
           );
         }
         if (text !== null && text !== undefined) {
+          const readyAt = Date.now();
+          const stopToReadyMs = metadata?.stopRequestedAt
+            ? readyAt - metadata.stopRequestedAt
+            : null;
+          const stopToOnStopMs = metadata?.stopToOnStopMs ?? null;
+          const recordMs = metadata?.durationSeconds
+            ? Math.round(metadata.durationSeconds * 1000)
+            : null;
+          const modelFamily = String(model).startsWith("qwen3-asr-")
+            ? "qwen"
+            : "whisper";
+
+          const latencyLine =
+            `[Latency] local-asr family=${modelFamily} model=${model} ` +
+            `record_ms=${recordMs ?? "n/a"} stop_to_onstop_ms=${stopToOnStopMs ?? "n/a"} ` +
+            `asr_ms=${localTranscribeMs ?? "n/a"} post_ms=${postProcessMs ?? "n/a"} ` +
+            `stop_to_ready_ms=${stopToReadyMs ?? "n/a"} audio_bytes=${metadata?.audioBlobBytes ?? "n/a"}`;
+
+          console.log(latencyLine);
+          debugLogger.logReasoning("LATENCY_LOCAL_ASR", {
+            family: modelFamily,
+            model,
+            recordMs,
+            stopToOnStopMs,
+            asrMs: localTranscribeMs,
+            postMs: postProcessMs,
+            stopToReadyMs,
+            audioBytes: metadata?.audioBlobBytes,
+          });
+
           return { success: true, text: text || result.text, source: "local" };
         } else {
           throw new Error("No text transcribed");

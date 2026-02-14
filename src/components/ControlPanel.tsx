@@ -56,10 +56,16 @@ export default function ControlPanel() {
           await window.electronAPI?.showControlPanel?.();
         }
 
-        // Initialize whisper with saved settings
+        // Initialize ASR server with saved settings (preload selected local model on startup)
         const useLocalWhisper =
           localStorage.getItem("useLocalWhisper") === "true";
-        const whisperModel = localStorage.getItem("whisperModel") || "base";
+        const asrProvider = (localStorage.getItem("asrProvider") || "whisper") as
+          | "whisper"
+          | "qwen";
+        const whisperModel =
+          localStorage.getItem("whisperModel") ||
+          (asrProvider === "qwen" ? "qwen3-asr-0.6b" : "base");
+
         if (useLocalWhisper) {
           const result = await window.electronAPI?.initializeWhisperSettings?.({
             useLocalWhisper,

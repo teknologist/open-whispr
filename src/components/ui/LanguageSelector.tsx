@@ -6,12 +6,14 @@ interface LanguageSelectorProps {
   value: string;
   onChange: (value: string) => void;
   className?: string;
+  options?: Array<{ value: string; label: string }>;
 }
 
 export default function LanguageSelector({
   value,
   onChange,
   className = "",
+  options = LANGUAGE_OPTIONS,
 }: LanguageSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -19,7 +21,7 @@ export default function LanguageSelector({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  const filteredLanguages = LANGUAGE_OPTIONS.filter(
+  const filteredLanguages = options.filter(
     (lang) =>
       lang.label.toLowerCase().includes(searchQuery.toLowerCase()) ||
       lang.value.toLowerCase().includes(searchQuery.toLowerCase())

@@ -182,8 +182,9 @@ class ClipboardManager {
     // Get the text that was copied to clipboard
     const textToType = clipboard.readText();
 
-    // On Wayland, use wtype for all text (supports UTF-8 accents)
+    // On Wayland, try wtype first, then fall back to ydotool
     if (isWayland) {
+      // Try wtype first (supports UTF-8 accents better)
       if (commandExists("wtype")) {
         try {
           await this.typeWithWtype(textToType);
@@ -192,15 +193,34 @@ class ClipboardManager {
           clipboard.writeText(originalClipboard);
           return;
         } catch (error) {
+          this.safeLog(
+            "⚠️ wtype failed, will try ydotool fallback:",
+            error?.message || error,
+          );
+          // Continue to ydotool fallback
+        }
+      }
+
+      // Fallback to ydotool (works on GNOME where wtype doesn't)
+      if (commandExists("ydotool")) {
+        try {
+          await this.typeWithYdotool(textToType);
+          this.safeLog("✅ Text typed successfully using ydotool fallback");
+          // Restore original clipboard
+          clipboard.writeText(originalClipboard);
+          return;
+        } catch (error) {
           throw new Error(
-            `wtype failed: ${error?.message || error}. Please ensure wtype is installed and working.`,
+            `Both wtype and ydotool failed: ${error?.message || error}. Please ensure at least one is installed and working.`,
           );
         }
-      } else {
-        throw new Error(
-          "wtype is required on Wayland. Please install it: https://github.com/atx/wtype",
-        );
       }
+
+      throw new Error(
+        "wtype or ydotool is required on Wayland. Please install one of them:\n" +
+          "- wtype: https://github.com/atx/wtype (works on most compositors except GNOME)\n" +
+          "- ydotool: https://github.com/ReimuNotMoe/ydotool (works on GNOME)",
+      );
     }
 
     // On X11, use Ctrl+V simulation with xdotool

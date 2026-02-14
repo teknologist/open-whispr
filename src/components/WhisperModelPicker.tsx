@@ -6,6 +6,7 @@ interface WhisperModelPickerProps {
   onModelSelect: (model: string) => void;
   className?: string;
   variant?: "onboarding" | "settings";
+  provider?: "whisper" | "qwen";
 }
 
 export default function WhisperModelPicker({
@@ -13,12 +14,14 @@ export default function WhisperModelPicker({
   onModelSelect,
   className = "",
   variant = "settings",
+  provider = "whisper",
 }: WhisperModelPickerProps) {
   return (
     <UnifiedModelPicker
       selectedModel={selectedModel}
       onModelSelect={onModelSelect}
       modelType="whisper"
+      provider={provider}
       className={className}
       variant={variant}
     />

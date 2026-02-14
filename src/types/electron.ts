@@ -7,14 +7,20 @@ export interface TranscriptionItem {
 
 export interface WhisperInstallResult {
   success: boolean;
-  message: string;
-  output: string;
+  message?: string;
+  output?: string;
+  error?: string;
+  torchcodec_installed?: boolean;
+  torchcodec_warning?: string | null;
 }
 
 export interface WhisperCheckResult {
   installed: boolean;
   working: boolean;
   error?: string;
+  torchcodec_installed?: boolean;
+  torchcodec_auto_installed?: boolean;
+  torchcodec_warning?: string | null;
 }
 
 export interface WhisperModelResult {
@@ -181,7 +187,9 @@ declare global {
         options?: any,
       ) => Promise<any>;
       checkWhisperInstallation: () => Promise<WhisperCheckResult>;
+      checkQwenInstallation: () => Promise<WhisperCheckResult>;
       installWhisper: () => Promise<WhisperInstallResult>;
+      installQwen: () => Promise<WhisperInstallResult>;
       onWhisperInstallProgress: (
         callback: (event: any, data: WhisperInstallProgressData) => void,
       ) => (() => void) | void;

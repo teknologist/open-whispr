@@ -1,6 +1,6 @@
 {
   "name": "open-whispr",
-  "version": "1.0.17",
+  "version": "1.1.0",
   "description": "A desktop dictation application using OpenAI Whisper for speech-to-text transcription",
   "homepage": "https://github.com/openwhispr/open-whispr",
   "main": "main.js",
@@ -24,6 +24,8 @@
     "build:win": "npm run build:renderer && electron-builder --win",
     "prebuild:linux": "npm run compile:globe",
     "build:linux": "npm run build:renderer && electron-builder --linux",
+    "build:rpm-local": "./scripts/build-fedora-rpm.sh",
+    "install:rpm-local": "./scripts/install-fedora-rpm.sh",
     "setup": "node setup.js",
     "prepack": "npm run compile:globe",
     "pack": "npm run build:renderer && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir",

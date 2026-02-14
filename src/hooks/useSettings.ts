@@ -1,17 +1,23 @@
 import { useCallback } from "react";
 import { useLocalStorage } from "./useLocalStorage";
-import { getModelProvider } from "../utils/languages";
+import { getModelProvider, ASRProvider } from "../utils/languages";
 import { API_ENDPOINTS } from "../config/constants";
 
 export interface TranscriptionSettings {
   useLocalWhisper: boolean;
   whisperModel: string;
+  asrProvider: ASRProvider;
   allowOpenAIFallback: boolean;
   allowLocalFallback: boolean;
   fallbackWhisperModel: string;
   preferredLanguage: string;
   translateToEnglish: boolean;
   cloudTranscriptionBaseUrl?: string;
+}
+
+export interface ASRInstallationState {
+  whisperInstalled: boolean;  // faster-whisper
+  qwenInstalled: boolean;     // transformers + torch
 }
 
 export interface ReasoningSettings {
@@ -169,7 +175,7 @@ export function useFeedbackSettings() {
   };
 }
 
-// Valid Whisper model names (whitelist for security)
+// Valid local ASR model names (whitelist for security)
 const VALID_WHISPER_MODELS = [
   "tiny",
   "tiny.en",
@@ -188,6 +194,8 @@ const VALID_WHISPER_MODELS = [
   "distil-medium.en",
   "distil-large-v2",
   "distil-large-v3",
+  "qwen3-asr-0.6b",
+  "qwen3-asr-1.7b",
 ];
 
 // Valid reasoning model patterns
@@ -230,6 +238,18 @@ export function useSettings() {
           return value;
         }
         return "base"; // Default to safe value
+      },
+    },
+  );
+
+  const [asrProvider, setAsrProvider] = useLocalStorage<ASRProvider>(
+    "asrProvider",
+    "whisper",
+    {
+      serialize: String,
+      deserialize: (value) => {
+        if (value === "qwen") return "qwen";
+        return "whisper"; // Default
       },
     },
   );
@@ -401,6 +421,8 @@ export function useSettings() {
         setUseLocalWhisper(settings.useLocalWhisper);
       if (settings.whisperModel !== undefined)
         setWhisperModel(settings.whisperModel);
+      if (settings.asrProvider !== undefined)
+        setAsrProvider(settings.asrProvider);
       if (settings.allowOpenAIFallback !== undefined)
         setAllowOpenAIFallback(settings.allowOpenAIFallback);
       if (settings.allowLocalFallback !== undefined)
@@ -417,6 +439,7 @@ export function useSettings() {
     [
       setUseLocalWhisper,
       setWhisperModel,
+      setAsrProvider,
       setAllowOpenAIFallback,
       setAllowLocalFallback,
       setFallbackWhisperModel,
@@ -464,6 +487,7 @@ export function useSettings() {
   return {
     useLocalWhisper,
     whisperModel,
+    asrProvider,
     allowOpenAIFallback,
     allowLocalFallback,
     fallbackWhisperModel,
@@ -480,6 +504,7 @@ export function useSettings() {
     dictationKey,
     setUseLocalWhisper,
     setWhisperModel,
+    setAsrProvider,
     setAllowOpenAIFallback,
     setAllowLocalFallback,
     setFallbackWhisperModel,

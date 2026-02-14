@@ -12,6 +12,7 @@ class WhisperManager {
   constructor() {
     this.pythonCmd = null;
     this.whisperInstalled = null;
+    this.qwenInstalled = null;
     this.isInitialized = false;
     this.currentDownloadProcess = null;
     this.pythonInstaller = new PythonInstaller();
@@ -28,6 +29,32 @@ class WhisperManager {
   }
 
   // --- Server Mode Methods ---
+
+  isQwenModel(modelName = "") {
+    return String(modelName).toLowerCase().startsWith("qwen3-asr-");
+  }
+
+  getServerStartupTimeout(modelName = "base") {
+    // Qwen models can take significantly longer to initialize than Whisper.
+    if (this.isQwenModel(modelName)) {
+      return modelName.includes("1.7b") ? 5 * 60 * 1000 : 3 * 60 * 1000;
+    }
+    return 60 * 1000;
+  }
+
+  getServerReloadTimeout(modelName = "base") {
+    if (this.isQwenModel(modelName)) {
+      return modelName.includes("1.7b") ? 4 * 60 * 1000 : 2 * 60 * 1000;
+    }
+    return 60 * 1000;
+  }
+
+  getTranscriptionTimeout(modelName = "base") {
+    if (this.isQwenModel(modelName)) {
+      return 5 * 60 * 1000;
+    }
+    return 120 * 1000;
+  }
 
   async startServer(modelName = "base") {
     // If server is already running with the same model, do nothing
@@ -47,8 +74,8 @@ class WhisperManager {
       debugLogger.log(
         `Whisper server already starting, waiting for it to complete...`,
       );
-      // Wait up to 60 seconds for the other start to complete
-      const maxWait = 60000;
+      // Wait up to startup timeout for the other start to complete
+      const maxWait = this.getServerStartupTimeout(modelName);
       const checkInterval = 100;
       let waited = 0;
       while (this.isStarting && waited < maxWait) {
@@ -152,13 +179,18 @@ class WhisperManager {
       });
 
       // Wait for server ready signal with timeout
+      const startupTimeoutMs = this.getServerStartupTimeout(modelName);
       const startTimeout = setTimeout(() => {
         if (!this.serverReady) {
           this.isStarting = false; // Clear starting flag on timeout
           this.stopServer();
-          reject(new Error("Server startup timed out (60 seconds)"));
+          reject(
+            new Error(
+              `Server startup timed out (${Math.round(startupTimeoutMs / 1000)} seconds)`,
+            ),
+          );
         }
-      }, 60000);
+      }, startupTimeoutMs);
 
       // Listen for ready signal
       const checkReady = (response) => {
@@ -315,12 +347,19 @@ class WhisperManager {
       }
 
       // Timeout for transcription
+      const transcriptionTimeoutMs = this.getTranscriptionTimeout(
+        this.serverModel || "base",
+      );
       const timeout = setTimeout(() => {
         if (this.pendingRequests.has(0)) {
           this.pendingRequests.delete(0);
-          reject(new Error("Transcription request timed out (120 seconds)"));
+          reject(
+            new Error(
+              `Transcription request timed out (${Math.round(transcriptionTimeoutMs / 1000)} seconds)`,
+            ),
+          );
         }
-      }, 120000);
+      }, transcriptionTimeoutMs);
 
       // Clear timeout when resolved
       const originalResolve = resolve;
@@ -376,12 +415,17 @@ class WhisperManager {
       }
 
       // Timeout for reload
+      const reloadTimeoutMs = this.getServerReloadTimeout(modelName);
       setTimeout(() => {
         if (this.pendingRequests.has(0)) {
           this.pendingRequests.delete(0);
-          reject(new Error("Model reload timed out (60 seconds)"));
+          reject(
+            new Error(
+              `Model reload timed out (${Math.round(reloadTimeoutMs / 1000)} seconds)`,
+            ),
+          );
         }
-      }, 60000);
+      }, reloadTimeoutMs);
     });
   }
 
@@ -438,26 +482,72 @@ class WhisperManager {
   }
 
   getWhisperScriptPath() {
-    // In production, the file is unpacked from ASAR
-    if (process.env.NODE_ENV === "development") {
-      return path.join(__dirname, "..", "..", "whisper_bridge.py");
-    } else {
-      // In production, use the unpacked path
-      return path.join(
-        process.resourcesPath,
-        "app.asar.unpacked",
-        "whisper_bridge.py",
+    // Resolve bridge path by probing known locations instead of relying on NODE_ENV.
+    // IMPORTANT: Python cannot read files inside app.asar virtual paths.
+    // Always prefer real filesystem paths, especially app.asar.unpacked.
+    const candidates = [];
+
+    if (process.env.OPENWHISPR_BRIDGE_PATH) {
+      candidates.push(process.env.OPENWHISPR_BRIDGE_PATH);
+    }
+
+    // Packaged Electron locations first (real files)
+    if (process.resourcesPath) {
+      candidates.push(
+        path.join(process.resourcesPath, "app.asar.unpacked", "whisper_bridge.py"),
+      );
+      candidates.push(path.join(process.resourcesPath, "whisper_bridge.py"));
+      candidates.push(
+        path.join(
+          process.resourcesPath,
+          "..",
+          "app.asar.unpacked",
+          "whisper_bridge.py",
+        ),
       );
     }
+
+    // Source checkout locations
+    candidates.push(path.join(__dirname, "..", "..", "whisper_bridge.py"));
+    candidates.push(path.join(process.cwd(), "whisper_bridge.py"));
+
+    for (const candidate of candidates) {
+      try {
+        const resolved = path.resolve(candidate);
+
+        // Reject Electron ASAR virtual paths (Python cannot open these).
+        // Example bad path: /opt/OpenWhispr/resources/app.asar/whisper_bridge.py
+        if (
+          resolved.includes(`${path.sep}app.asar${path.sep}`) &&
+          !resolved.includes("app.asar.unpacked")
+        ) {
+          continue;
+        }
+
+        if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+          return resolved;
+        }
+      } catch (_) {
+        // continue probing
+      }
+    }
+
+    throw new Error(
+      `whisper_bridge.py not found. Checked: ${candidates.join(", ")}`,
+    );
   }
 
   async initializeAtStartup(settings = {}) {
     try {
       await this.findPythonExecutable();
-      await this.checkWhisperInstallation();
       this.isInitialized = true;
 
-      // If local Whisper is enabled and a model is set, preload it into GPU
+      // Best-effort Whisper dependency check (non-blocking for Qwen/other models)
+      this.checkWhisperInstallation().catch(() => {
+        // ignored on startup
+      });
+
+      // Always preload selected local model at app start when local mode is enabled.
       const { useLocalWhisper, whisperModel } = settings;
       if (useLocalWhisper && whisperModel) {
         console.log(
@@ -477,7 +567,7 @@ class WhisperManager {
         }
       }
     } catch (error) {
-      // Whisper not available at startup is not critical
+      // Startup initialization is best-effort
       this.isInitialized = true;
     }
   }
@@ -1128,6 +1218,100 @@ class WhisperManager {
     }
   }
 
+  async checkQwenInstallation() {
+    // Return cached result if available
+    if (this.qwenInstalled !== null) {
+      return this.qwenInstalled;
+    }
+
+    try {
+      const pythonCmd = await this.findPythonExecutable();
+      const whisperScriptPath = this.getWhisperScriptPath();
+
+      const result = await new Promise((resolve) => {
+        const checkProcess = spawn(pythonCmd, [
+          whisperScriptPath,
+          "--mode",
+          "check-qwen",
+        ]);
+
+        let output = "";
+        let stderr = "";
+
+        checkProcess.stdout.on("data", (data) => {
+          output += data.toString();
+        });
+
+        checkProcess.stderr.on("data", (data) => {
+          stderr += data.toString();
+        });
+
+        checkProcess.on("close", (code) => {
+          if (code === 0) {
+            try {
+              const parsed = JSON.parse(output);
+              resolve({
+                installed: !!parsed.installed,
+                working: !!parsed.installed,
+                ...parsed,
+              });
+            } catch (parseError) {
+              resolve({
+                installed: false,
+                working: false,
+                error: "Failed to parse qwen dependency check output",
+              });
+            }
+          } else {
+            resolve({
+              installed: false,
+              working: false,
+              error: stderr || "Qwen dependency check failed",
+            });
+          }
+        });
+
+        checkProcess.on("error", (error) => {
+          resolve({ installed: false, working: false, error: error.message });
+        });
+      });
+
+      this.qwenInstalled = result;
+      return result;
+    } catch (error) {
+      const errorResult = {
+        installed: false,
+        working: false,
+        error: error.message,
+      };
+      this.qwenInstalled = errorResult;
+      return errorResult;
+    }
+  }
+
+  async installQwen() {
+    const pythonCmd = await this.findPythonExecutable();
+    const whisperScriptPath = this.getWhisperScriptPath();
+
+    const result = await runCommand(
+      pythonCmd,
+      [whisperScriptPath, "--mode", "install-qwen"],
+      {
+        timeout: TIMEOUTS.DOWNLOAD,
+      },
+    );
+
+    try {
+      const parsed = JSON.parse(result.output || "{}");
+      if (parsed.success) {
+        this.qwenInstalled = { installed: true, working: true, ...parsed };
+      }
+      return parsed;
+    } catch (error) {
+      throw new Error(`Failed to parse Qwen install result: ${error.message}`);
+    }
+  }
+
   async checkFFmpegAvailability() {
     debugLogger.logWhisperPipeline("checkFFmpegAvailability - start", {});
 
@@ -1220,6 +1404,39 @@ class WhisperManager {
 
   async installWhisper() {
     const pythonCmd = await this.findPythonExecutable();
+
+    // First, ensure pip is installed
+    try {
+      await runCommand(pythonCmd, ["-m", "pip", "--version"], {
+        timeout: TIMEOUTS.QUICK_CHECK,
+      });
+    } catch (pipNotFoundError) {
+      // Pip not installed, try to install it via ensurepip
+      try {
+        await runCommand(pythonCmd, ["-m", "ensurepip", "--upgrade"], {
+          timeout: TIMEOUTS.PIP_UPGRADE,
+        });
+      } catch (ensurepipError) {
+        // ensurepip failed, try installing pip via get-pip.py
+        try {
+          const { exec } = require("child_process");
+          const util = require("util");
+          const execPromise = util.promisify(exec);
+
+          // Download and run get-pip.py
+          await execPromise(
+            `curl -sS https://bootstrap.pypa.io/get-pip.py | "${pythonCmd}"`,
+            { timeout: TIMEOUTS.PIP_UPGRADE * 2 }
+          );
+        } catch (getPipError) {
+          throw new Error(
+            "Failed to install pip. Please install pip manually:\n" +
+              "Fedora: sudo dnf install python3-pip\n" +
+              "Ubuntu: sudo apt install python3-pip"
+          );
+        }
+      }
+    }
 
     // Upgrade pip first to avoid version issues
     try {

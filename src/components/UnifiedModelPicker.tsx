@@ -26,6 +26,7 @@ interface Model {
   downloaded?: boolean;
   isDownloaded?: boolean;
   recommended?: boolean;
+  family?: string;
   type: "whisper" | "llm";
 }
 
@@ -41,6 +42,7 @@ interface UnifiedModelPickerProps {
   selectedModel: string;
   onModelSelect: (modelId: string) => void;
   modelType: "whisper" | "llm";
+  provider?: "whisper" | "qwen";
   className?: string;
   variant?: "onboarding" | "settings";
 }
@@ -168,6 +170,7 @@ export default function UnifiedModelPicker({
   selectedModel,
   onModelSelect,
   modelType,
+  provider = "whisper",
   className = "",
   variant = "settings",
 }: UnifiedModelPickerProps) {
@@ -244,7 +247,13 @@ export default function UnifiedModelPicker({
               family: m.family || "whisper",
             };
           });
-          setModels(whisperModels);
+          const filteredWhisperModels = whisperModels.filter((m) => {
+            if (provider === "qwen") {
+              return m.family === "qwen-asr";
+            }
+            return m.family !== "qwen-asr";
+          });
+          setModels(filteredWhisperModels);
         }
       } else {
         console.log("[UnifiedModelPicker] Loading LLM models...");
@@ -271,7 +280,7 @@ export default function UnifiedModelPicker({
     } finally {
       setLoadingModels(false);
     }
-  }, [modelType]);
+  }, [modelType, provider]);
 
   useEffect(() => {
     loadModels();
@@ -403,6 +412,8 @@ export default function UnifiedModelPicker({
                   title: "Model Deleted",
                   description: `Model deleted successfully! Freed ${result.freed_mb}MB of disk space.`,
                 });
+              } else {
+                throw new Error(result.error || "Unknown error");
               }
             } else {
               await window.electronAPI.modelDelete(modelId);

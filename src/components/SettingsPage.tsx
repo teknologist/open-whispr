@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Toggle } from "./ui/toggle";
@@ -26,9 +26,16 @@ import {
 import { useDialogs } from "../hooks/useDialogs";
 import { useAgentName } from "../utils/agentName";
 import { useWhisper } from "../hooks/useWhisper";
+import { usePython } from "../hooks/usePython";
 import { usePermissions } from "../hooks/usePermissions";
 import { useClipboard } from "../hooks/useClipboard";
-import { REASONING_PROVIDERS } from "../utils/languages";
+import {
+  REASONING_PROVIDERS,
+  ASR_PROVIDERS,
+  getLanguagesForProvider,
+  isLanguageSupported,
+  type ASRProvider,
+} from "../utils/languages";
 import { formatHotkeyLabel } from "../utils/hotkeys";
 import LanguageSelector from "./ui/LanguageSelector";
 import PromptStudio from "./ui/PromptStudio";
@@ -65,6 +72,7 @@ export default function SettingsPage({
   const {
     useLocalWhisper,
     whisperModel,
+    asrProvider,
     allowOpenAIFallback,
     allowLocalFallback,
     fallbackWhisperModel,
@@ -84,6 +92,7 @@ export default function SettingsPage({
     useBackgroundNoiseDetection,
     setUseLocalWhisper,
     setWhisperModel,
+    setAsrProvider,
     setAllowOpenAIFallback,
     setAllowLocalFallback,
     setFallbackWhisperModel,
@@ -124,6 +133,15 @@ export default function SettingsPage({
   }>({});
   const [isRemovingModels, setIsRemovingModels] = useState(false);
   const [isWayland, setIsWayland] = useState(false);
+  const [qwenStatus, setQwenStatus] = useState<{
+    checking: boolean;
+    installing: boolean;
+    installed: boolean;
+    error?: string;
+    warning?: string;
+    torchcodecInstalled?: boolean;
+    torchcodecAutoInstalled?: boolean;
+  }>({ checking: false, installing: false, installed: false });
 
   // Detect Wayland session on mount
   useEffect(() => {
@@ -132,6 +150,93 @@ export default function SettingsPage({
       setIsWayland(true);
     }
   }, []);
+
+  const availableLanguagesForProvider = useMemo(
+    () => getLanguagesForProvider(asrProvider),
+    [asrProvider],
+  );
+
+  const silenceAutoStopDisabledForQwen =
+    useLocalWhisper && asrProvider === "qwen";
+
+  // Ensure selected model matches current ASR provider
+  useEffect(() => {
+    if (!useLocalWhisper) return;
+
+    if (asrProvider === "qwen" && !whisperModel.startsWith("qwen3-asr-")) {
+      setWhisperModel("qwen3-asr-0.6b");
+      updateTranscriptionSettings({ whisperModel: "qwen3-asr-0.6b" });
+    }
+    if (asrProvider === "whisper" && whisperModel.startsWith("qwen3-asr-")) {
+      setWhisperModel("base");
+      updateTranscriptionSettings({ whisperModel: "base" });
+    }
+  }, [
+    useLocalWhisper,
+    asrProvider,
+    whisperModel,
+    setWhisperModel,
+    updateTranscriptionSettings,
+  ]);
+
+  // Ensure selected language is supported by provider
+  useEffect(() => {
+    if (!useLocalWhisper) return;
+    if (!isLanguageSupported(preferredLanguage, asrProvider)) {
+      setPreferredLanguage("auto");
+      updateTranscriptionSettings({ preferredLanguage: "auto" });
+    }
+  }, [
+    useLocalWhisper,
+    asrProvider,
+    preferredLanguage,
+    setPreferredLanguage,
+    updateTranscriptionSettings,
+  ]);
+
+  // Check Qwen dependency installation when Qwen provider is selected
+  useEffect(() => {
+    if (!useLocalWhisper || asrProvider !== "qwen") return;
+
+    let cancelled = false;
+    const checkQwen = async () => {
+      try {
+        setQwenStatus((prev) => ({ ...prev, checking: true, error: undefined, warning: undefined }));
+        const result = await window.electronAPI.checkQwenInstallation();
+        if (!cancelled) {
+          setQwenStatus({
+            checking: false,
+            installing: false,
+            installed: !!result.installed,
+            error: result.error,
+            warning:
+              typeof result.torchcodec_warning === "string"
+                ? result.torchcodec_warning.slice(0, 500)
+                : undefined,
+            torchcodecInstalled: result.torchcodec_installed,
+            torchcodecAutoInstalled: result.torchcodec_auto_installed,
+          });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setQwenStatus({
+            checking: false,
+            installing: false,
+            installed: false,
+            error: String(error),
+            warning: undefined,
+            torchcodecInstalled: false,
+            torchcodecAutoInstalled: false,
+          });
+        }
+      }
+    };
+
+    checkQwen();
+    return () => {
+      cancelled = true;
+    };
+  }, [useLocalWhisper, asrProvider]);
 
   // Load available audio devices when transcription section is active
   useEffect(() => {
@@ -196,6 +301,14 @@ export default function SettingsPage({
     (updateStatus.updateAvailable || updateStatus.updateDownloaded);
 
   const whisperHook = useWhisper(showAlertDialog);
+  const pythonHook = usePython(showAlertDialog);
+
+  // Set up installation progress listeners
+  useEffect(() => {
+    const cleanupWhisper = whisperHook.setupProgressListener();
+    return () => cleanupWhisper?.();
+  }, [whisperHook]);
+
   const permissionsHook = usePermissions(showAlertDialog);
   const { pasteFromClipboardWithFallback } = useClipboard(showAlertDialog);
   const { agentName, setAgentName } = useAgentName();
@@ -617,6 +730,47 @@ export default function SettingsPage({
       },
     });
   }, [isRemovingModels, cachePathHint, showConfirmDialog, showAlertDialog]);
+
+  const handleInstallQwen = useCallback(async () => {
+    try {
+      setQwenStatus((prev) => ({ ...prev, installing: true, error: undefined, warning: undefined }));
+      const result = await window.electronAPI.installQwen();
+      if (result?.success) {
+        setQwenStatus({
+          checking: false,
+          installing: false,
+          installed: true,
+          warning:
+            typeof result.torchcodec_warning === "string"
+              ? result.torchcodec_warning.slice(0, 500)
+              : undefined,
+          torchcodecInstalled: result.torchcodec_installed,
+          torchcodecAutoInstalled: false,
+        });
+      } else {
+        setQwenStatus((prev) => ({
+          ...prev,
+          checking: false,
+          installing: false,
+          installed: false,
+          error: result?.error || "Failed to install Qwen dependencies",
+          warning:
+            typeof result?.torchcodec_warning === "string"
+              ? result.torchcodec_warning.slice(0, 500)
+              : undefined,
+        }));
+      }
+    } catch (error) {
+      setQwenStatus((prev) => ({
+        ...prev,
+        checking: false,
+        installing: false,
+        installed: false,
+        error: String(error),
+        warning: undefined,
+      }));
+    }
+  }, []);
 
   const renderSectionContent = () => {
     switch (activeSection) {
@@ -1447,6 +1601,88 @@ export default function SettingsPage({
               />
             </div>
 
+            {useLocalWhisper && (
+              <div className="space-y-3 p-4 bg-purple-50 border border-purple-200 rounded-xl">
+                <h4 className="font-medium text-purple-900">Local ASR Provider</h4>
+                <select
+                  value={asrProvider}
+                  onChange={(e) => {
+                    const provider = e.target.value as ASRProvider;
+                    setAsrProvider(provider);
+                    updateTranscriptionSettings({ asrProvider: provider });
+                  }}
+                  className="w-full px-3 py-2 border border-purple-300 rounded-md text-sm bg-white"
+                >
+                  <option value="whisper">
+                    {ASR_PROVIDERS.whisper.name} — {ASR_PROVIDERS.whisper.description}
+                  </option>
+                  <option value="qwen">
+                    {ASR_PROVIDERS.qwen.name} — {ASR_PROVIDERS.qwen.description}
+                  </option>
+                </select>
+              </div>
+            )}
+
+            {useLocalWhisper && asrProvider === "qwen" && !qwenStatus.installed && (
+              <div className="space-y-4 p-4 bg-amber-50 border border-amber-200 rounded-xl">
+                <div className="flex items-start gap-3">
+                  <span className="text-amber-600 text-xl">⚠️</span>
+                  <div>
+                    <h4 className="font-medium text-amber-900">
+                      Qwen Dependencies Required
+                    </h4>
+                    <p className="text-sm text-amber-700 mt-1">
+                      Install qwen-asr, transformers, torch, torchaudio, librosa, and soundfile to use Qwen3-ASR.
+                    </p>
+                  </div>
+                </div>
+
+                {qwenStatus.error && (
+                  <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
+                    {qwenStatus.error}
+                  </p>
+                )}
+
+                {qwenStatus.installing ? (
+                  <div className="bg-white p-4 rounded-lg">
+                    <div className="flex items-center justify-center gap-3 mb-2">
+                      <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-amber-600"></div>
+                      <span className="font-medium text-amber-900">
+                        Installing Qwen dependencies...
+                      </span>
+                    </div>
+                    <p className="text-xs text-amber-700">
+                      This may take several minutes depending on your network and hardware.
+                    </p>
+                  </div>
+                ) : (
+                  <Button
+                    onClick={handleInstallQwen}
+                    className="w-full bg-amber-600 hover:bg-amber-700"
+                    disabled={qwenStatus.checking}
+                  >
+                    <Download className="mr-2 h-4 w-4" />
+                    Install Qwen Dependencies
+                  </Button>
+                )}
+              </div>
+            )}
+
+            {useLocalWhisper && asrProvider === "qwen" && (qwenStatus.warning || qwenStatus.torchcodecAutoInstalled) && (
+              <div className="space-y-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                {qwenStatus.torchcodecAutoInstalled && (
+                  <p className="text-xs text-amber-900">
+                    ✅ torchcodec was auto-installed for faster audio decoding.
+                  </p>
+                )}
+                {qwenStatus.warning && (
+                  <p className="text-xs text-amber-800 break-words">
+                    ⚠️ Optional dependency note: {qwenStatus.warning}
+                  </p>
+                )}
+              </div>
+            )}
+
             {!useLocalWhisper && (
               <div className="space-y-4 p-4 bg-blue-50 border border-blue-200 rounded-xl">
                 <h4 className="font-medium text-blue-900">
@@ -1508,16 +1744,115 @@ export default function SettingsPage({
               </div>
             )}
 
-            {useLocalWhisper && whisperHook.whisperInstalled && (
+            {useLocalWhisper &&
+              ((asrProvider === "qwen" && qwenStatus.installed) ||
+                (asrProvider === "whisper" && whisperHook.whisperInstalled)) && (
               <div className="space-y-4 p-4 bg-purple-50 border border-purple-200 rounded-xl">
                 <h4 className="font-medium text-purple-900">
-                  Local Whisper Model
+                  {asrProvider === "qwen" ? "Local Qwen3-ASR Model" : "Local Whisper Model"}
                 </h4>
                 <WhisperModelPicker
                   selectedModel={whisperModel}
                   onModelSelect={setWhisperModel}
+                  provider={asrProvider}
                   variant="settings"
                 />
+              </div>
+            )}
+
+            {useLocalWhisper &&
+              asrProvider === "whisper" &&
+              !whisperHook.whisperInstalled &&
+              !whisperHook.checkingWhisper &&
+              pythonHook.hasChecked && (
+              <div className="space-y-4 p-4 bg-amber-50 border border-amber-200 rounded-xl">
+                {/* Python not installed - show Python install */}
+                {!pythonHook.pythonInstalled && (
+                  <>
+                    <div className="flex items-start gap-3">
+                      <span className="text-amber-600 text-xl">⚠️</span>
+                      <div>
+                        <h4 className="font-medium text-amber-900">
+                          Python Required
+                        </h4>
+                        <p className="text-sm text-amber-700 mt-1">
+                          Python is required to run Whisper locally. Click below to install it automatically.
+                        </p>
+                      </div>
+                    </div>
+
+                    {pythonHook.installingPython ? (
+                      <div className="bg-white p-4 rounded-lg">
+                        <div className="flex items-center justify-center gap-3 mb-3">
+                          <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-amber-600"></div>
+                          <span className="font-medium text-amber-900">
+                            Installing Python...
+                          </span>
+                        </div>
+                        {pythonHook.installProgress && (
+                          <div className="text-xs text-amber-600 bg-amber-50 p-2 rounded font-mono">
+                            {pythonHook.installProgress}
+                          </div>
+                        )}
+                        <p className="text-xs text-amber-600 mt-2">
+                          This may take a few minutes. Please keep the app open.
+                        </p>
+                      </div>
+                    ) : (
+                      <Button
+                        onClick={pythonHook.installPython}
+                        className="w-full bg-amber-600 hover:bg-amber-700"
+                      >
+                        <Download className="mr-2 h-4 w-4" />
+                        Install Python
+                      </Button>
+                    )}
+                  </>
+                )}
+
+                {/* Python installed but Whisper not installed */}
+                {pythonHook.pythonInstalled && (
+                  <>
+                    <div className="flex items-start gap-3">
+                      <span className="text-green-600 text-xl">✓</span>
+                      <div>
+                        <h4 className="font-medium text-gray-900">
+                          Python Installed
+                        </h4>
+                        <p className="text-sm text-gray-600 mt-1">
+                          Now install Whisper to enable local transcription.
+                        </p>
+                      </div>
+                    </div>
+
+                    {whisperHook.installingWhisper ? (
+                      <div className="bg-white p-4 rounded-lg">
+                        <div className="flex items-center justify-center gap-3 mb-3">
+                          <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-amber-600"></div>
+                          <span className="font-medium text-amber-900">
+                            Installing Whisper...
+                          </span>
+                        </div>
+                        {whisperHook.installProgress && (
+                          <div className="text-xs text-amber-600 bg-amber-50 p-2 rounded font-mono">
+                            {whisperHook.installProgress}
+                          </div>
+                        )}
+                        <p className="text-xs text-amber-600 mt-2">
+                          This may take a few minutes. Please keep the app open.
+                        </p>
+                      </div>
+                    ) : (
+                      <Button
+                        onClick={whisperHook.installWhisper}
+                        className="w-full bg-amber-600 hover:bg-amber-700"
+                      >
+                        <Download className="mr-2 h-4 w-4" />
+                        Install Whisper
+                      </Button>
+                    )}
+                  </>
+                )}
               </div>
             )}
 
@@ -1525,6 +1860,7 @@ export default function SettingsPage({
               <h4 className="font-medium text-gray-900">Preferred Language</h4>
               <LanguageSelector
                 value={preferredLanguage}
+                options={useLocalWhisper ? availableLanguagesForProvider : undefined}
                 onChange={(value) => {
                   setPreferredLanguage(value);
                   updateTranscriptionSettings({ preferredLanguage: value });
@@ -1533,6 +1869,7 @@ export default function SettingsPage({
               />
               {/* Warning for English-only models */}
               {useLocalWhisper &&
+                asrProvider === "whisper" &&
                 (whisperModel === "distil-small.en" ||
                   whisperModel === "distil-medium.en") &&
                 preferredLanguage !== "en" &&
@@ -1585,12 +1922,21 @@ export default function SettingsPage({
                   </div>
                 </div>
                 <Toggle
-                  checked={silenceAutoStop}
+                  checked={silenceAutoStopDisabledForQwen ? false : silenceAutoStop}
                   onChange={setSilenceAutoStop}
+                  disabled={silenceAutoStopDisabledForQwen}
                 />
               </div>
 
-              {silenceAutoStop && (
+              {silenceAutoStopDisabledForQwen && (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                  <p className="text-xs text-amber-800">
+                    Auto-stop on silence is disabled for Qwen models. Use manual stop for best latency.
+                  </p>
+                </div>
+              )}
+
+              {silenceAutoStop && !silenceAutoStopDisabledForQwen && (
                 <div className="pt-4 border-t border-gray-200 space-y-4">
                   {/* Background noise detection toggle */}
                   <div className="flex items-center justify-between">
@@ -1668,6 +2014,7 @@ export default function SettingsPage({
                 updateTranscriptionSettings({
                   useLocalWhisper,
                   whisperModel,
+                  asrProvider,
                   preferredLanguage,
                   cloudTranscriptionBaseUrl: normalizedTranscriptionBase,
                 });
@@ -1677,7 +2024,7 @@ export default function SettingsPage({
                 }
 
                 const descriptionParts = [
-                  `Transcription mode: ${useLocalWhisper ? "Local Whisper" : "Cloud"}.`,
+                  `Transcription mode: ${useLocalWhisper ? `Local ${ASR_PROVIDERS[asrProvider].name}` : "Cloud"}.`,
                   `Language: ${preferredLanguage}.`,
                 ];
 

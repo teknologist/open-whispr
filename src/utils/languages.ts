@@ -66,6 +66,53 @@ export const getLanguageLabel = (code: string): string => {
   return option?.label || code;
 };
 
+// Qwen3-ASR supported languages (52 languages)
+// Source: https://huggingface.co/Qwen/Qwen3-ASR-0.6B
+export const QWEN_LANGUAGES = [
+  "auto", // Auto-detect
+  "en", "zh", "de", "fr", "es", "ru", "ja", "pt", "ko", "it",
+  "nl", "ar", "hi", "tr", "vi", "th", "id", "ms", "pl", "uk",
+  "cs", "ro", "hu", "el", "he", "sv", "da", "fi", "no", "bg",
+  "sk", "hr", "sl", "sr", "lt", "lv", "et", "fa", "ur", "bn",
+  "ta", "te", "ml", "mr", "ne", "si", "km", "lo", "my", "am",
+  "af", "az"
+];
+
+// ASR Provider configuration
+export type ASRProvider = "whisper" | "qwen";
+
+export const ASR_PROVIDERS: Record<ASRProvider, {
+  name: string;
+  description: string;
+  models: string[];
+  languages: string[];
+}> = {
+  whisper: {
+    name: "Whisper",
+    description: "OpenAI Whisper via faster-whisper (58 languages)",
+    models: ["tiny", "base", "small", "medium", "large-v3", "turbo",
+             "distil-small.en", "distil-medium.en", "distil-large-v2", "distil-large-v3"],
+    languages: LANGUAGE_OPTIONS.map(l => l.value), // All 58 languages
+  },
+  qwen: {
+    name: "Qwen3-ASR",
+    description: "Alibaba's Qwen3 ASR via transformers (52 languages)",
+    models: ["qwen3-asr-0.6b", "qwen3-asr-1.7b"],
+    languages: QWEN_LANGUAGES,
+  },
+};
+
+// Helper to check if a language is supported by a provider
+export const isLanguageSupported = (language: string, provider: ASRProvider): boolean => {
+  return ASR_PROVIDERS[provider].languages.includes(language);
+};
+
+// Helper to get filtered language options for a provider
+export const getLanguagesForProvider = (provider: ASRProvider) => {
+  const supportedCodes = ASR_PROVIDERS[provider].languages;
+  return LANGUAGE_OPTIONS.filter(lang => supportedCodes.includes(lang.value));
+};
+
 // Reasoning model configuration with provider abstraction
 export const REASONING_PROVIDERS = {
   openai: {

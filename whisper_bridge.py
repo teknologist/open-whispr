@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Whisper Bridge Script for OpenWhispr
-Handles local speech-to-text processing using OpenAI's Whisper model
-Supports both standard Whisper and Distil-Whisper models via faster-whisper
+ASR Bridge Script for OpenWhispr
+Handles local speech-to-text processing using multiple ASR backends:
+- OpenAI Whisper (via faster-whisper)
+- Distil-Whisper (via faster-whisper)
+- Qwen3-ASR (via transformers)
 """
 
 import sys
@@ -13,6 +15,28 @@ from pathlib import Path
 import threading
 import time
 import gc
+
+# Qwen3-ASR support (optional - graceful fallback if not installed)
+try:
+    from qwen_asr import Qwen3ASRModel
+    import torch
+    QWEN_AVAILABLE = True
+except ImportError:
+    QWEN_AVAILABLE = False
+    Qwen3ASRModel = None
+    torch = None
+
+
+def ensure_qwen_modules():
+    """Lazily import Qwen dependencies so installs done during runtime are picked up."""
+    global QWEN_AVAILABLE, Qwen3ASRModel, torch
+    if not QWEN_AVAILABLE:
+        from qwen_asr import Qwen3ASRModel as _Qwen3ASRModel
+        import torch as _torch
+        Qwen3ASRModel = _Qwen3ASRModel
+        torch = _torch
+        QWEN_AVAILABLE = True
+    return Qwen3ASRModel, torch
 
 # Auto-detect and preload cuDNN libraries from pip packages
 def preload_cudnn_libraries():
@@ -141,6 +165,20 @@ WHISPER_MODELS = {
         "size_mb": 756,
         "description": "6x faster, multilingual→English output",
         "family": "distil-whisper"
+    },
+    # Qwen3-ASR models - use transformers library
+    # Support 52 languages with language identification
+    "qwen3-asr-0.6b": {
+        "hf_id": "Qwen/Qwen3-ASR-0.6B",
+        "size_mb": 1200,
+        "description": "Fast, CPU-friendly, 52 languages",
+        "family": "qwen-asr"
+    },
+    "qwen3-asr-1.7b": {
+        "hf_id": "Qwen/Qwen3-ASR-1.7B",
+        "size_mb": 3400,
+        "description": "High quality, GPU recommended, 52 languages",
+        "family": "qwen-asr"
     },
 }
 
@@ -366,44 +404,98 @@ def get_model_size_on_disk(model_name):
     return total_size
 
 
-def load_model(model_name="base"):
-    """Load Whisper/Distil-Whisper model with caching for performance"""
+def load_qwen_model(model_name):
+    """Load Qwen3-ASR model using qwen-asr library"""
     global _model_cache
 
-    from faster_whisper import WhisperModel
+    try:
+        QwenModelCls, torch_mod = ensure_qwen_modules()
+    except ImportError:
+        raise ImportError(
+            "Qwen3-ASR requires qwen-asr and torch. "
+            "Install with: pip install qwen-asr transformers torch torchaudio librosa soundfile"
+        )
+
+    model_info = WHISPER_MODELS.get(model_name)
+    if not model_info:
+        raise ValueError(f"Unknown Qwen model: {model_name}")
+
+    hf_id = model_info["hf_id"]
+    device = "cuda:0" if torch_mod.cuda.is_available() else "cpu"
+    dtype = torch_mod.bfloat16 if torch_mod.cuda.is_available() else torch_mod.float32
+
+    print(f"[whisper_bridge] Loading Qwen model '{model_name}' ({hf_id}) on {device}", file=sys.stderr)
+
+    model = QwenModelCls.from_pretrained(
+        hf_id,
+        dtype=dtype,
+        device_map=device,
+        max_inference_batch_size=32,
+        max_new_tokens=512,
+    )
+
+    return {
+        "model": model,
+        "device": device,
+        "family": "qwen-asr"
+    }
+
+
+def load_model(model_name="base"):
+    """Load ASR model with caching for performance (Whisper, Distil-Whisper, or Qwen3-ASR)"""
+    global _model_cache
 
     # Return cached model if available
     if model_name in _model_cache:
         return _model_cache[model_name]
 
+    # Get model info to determine family
+    model_info = WHISPER_MODELS.get(model_name)
+    family = model_info.get("family", "whisper") if model_info else "whisper"
+
+
     try:
-        device = get_device()
-        compute_type = get_compute_type()
-
-        # Get HuggingFace model ID
-        if model_name in WHISPER_MODELS:
-            hf_id = WHISPER_MODELS[model_name]["hf_id"]
+        if family == "qwen-asr":
+            model_data = load_qwen_model(model_name)
         else:
-            # Fallback: try using the model name directly (for custom models)
-            hf_id = model_name
+            # Load Whisper/Distil-Whisper model
+            from faster_whisper import WhisperModel
 
-        print(f"[whisper_bridge] Loading model '{model_name}' ({hf_id}) on {device} with {compute_type}", file=sys.stderr)
+            device = get_device()
+            compute_type = get_compute_type()
 
-        model = WhisperModel(
-            hf_id,
-            device=device,
-            compute_type=compute_type,
-            download_root=None  # Uses default HuggingFace cache
-        )
+            # Get HuggingFace model ID
+            if model_name in WHISPER_MODELS:
+                hf_id = WHISPER_MODELS[model_name]["hf_id"]
+            else:
+                hf_id = model_name
+
+            print(f"[whisper_bridge] Loading model '{model_name}' ({hf_id}) on {device} with {compute_type}", file=sys.stderr)
+
+            model = WhisperModel(
+                hf_id,
+                device=device,
+                compute_type=compute_type,
+                download_root=None
+            )
+            model_data = {
+                "model": model,
+                "family": family
+            }
 
         # Limit cache size
         if len(_model_cache) >= 2:
             oldest_key = next(iter(_model_cache))
+            oldest_model = _model_cache[oldest_key]
+            # Clean up GPU memory for Qwen models
+            if isinstance(oldest_model, dict) and oldest_model.get("family") == "qwen-asr":
+                if torch and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             del _model_cache[oldest_key]
             gc.collect()
 
-        _model_cache[model_name] = model
-        return model
+        _model_cache[model_name] = model_data
+        return model_data
 
     except (RuntimeError, ValueError, FileNotFoundError, OSError) as e:
         print(f"[whisper_bridge] Error loading model: {e}", file=sys.stderr)
@@ -517,8 +609,10 @@ def download_model(model_name="base"):
                 "success": False
             }
 
+        model_info = WHISPER_MODELS[model_name]
+
         # Get expected file size
-        expected_size = WHISPER_MODELS[model_name]["size_mb"]
+        expected_size = model_info["size_mb"]
 
         # Start progress monitoring in background thread
         progress_thread = threading.Thread(
@@ -528,8 +622,21 @@ def download_model(model_name="base"):
         )
         progress_thread.start()
 
-        # Start the actual download by loading the model
-        model = load_model(model_name)
+        # Start the actual download.
+        # For Qwen models, download snapshot directly without loading into GPU/CPU memory.
+        family = model_info.get("family", "whisper")
+        if family == "qwen-asr":
+            try:
+                ensure_qwen_modules()
+            except ImportError:
+                model = None
+            else:
+                from huggingface_hub import snapshot_download
+                snapshot_download(repo_id=model_info["hf_id"], resume_download=True)
+                model = True
+        else:
+            # Whisper/Distil keeps existing behavior (download via model load)
+            model = load_model(model_name)
 
         # Stop progress monitoring
         stop_event.set()
@@ -541,10 +648,21 @@ def download_model(model_name="base"):
                 print("[whisper_bridge] Warning: Progress monitor thread did not exit cleanly", file=sys.stderr)
 
         if model is None:
+            model_info = WHISPER_MODELS.get(model_name, {})
+            family = model_info.get("family", "whisper")
+            error_message = "Failed to download model"
+            if family == "qwen-asr":
+                try:
+                    ensure_qwen_modules()
+                except ImportError:
+                    error_message = (
+                        "Qwen3-ASR dependencies not installed. "
+                        "Install with: pip install qwen-asr transformers torch torchaudio librosa soundfile"
+                    )
             return {
                 "model": model_name,
                 "downloaded": False,
-                "error": "Failed to download model",
+                "error": error_message,
                 "success": False
             }
 
@@ -679,12 +797,121 @@ def delete_model(model_name="base"):
         }
 
 
+def transcribe_qwen_audio(audio_path, model_data, language=None):
+    """Transcribe audio using Qwen3-ASR model (qwen-asr backend)"""
+    model = model_data["model"]
+    temp_decoded_wav = None
+
+    try:
+        qwen_language = None if not language or language == "auto" else language
+        decode_start = time.time()
+
+        # Fast path: provide raw waveform tuple to qwen-asr to avoid internal
+        # librosa/audioread fallback (slow on some container formats).
+        import numpy as np
+        import soundfile as sf
+
+        try:
+            waveform, sample_rate = sf.read(audio_path, always_2d=False)
+            decode_source = "soundfile"
+        except Exception as sf_error:
+            # If input container isn't directly supported by soundfile (e.g. webm/opus
+            # bytes saved with .wav extension), transcode once via ffmpeg into clean PCM wav.
+            import tempfile
+            import subprocess
+
+            fd, temp_decoded_wav = tempfile.mkstemp(prefix="qwen_audio_", suffix=".wav")
+            os.close(fd)
+
+            ffmpeg_cmd = ffmpeg_path or "ffmpeg"
+            cmd = [
+                ffmpeg_cmd,
+                "-y",
+                "-i",
+                audio_path,
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-f",
+                "wav",
+                temp_decoded_wav,
+            ]
+
+            ffmpeg_result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if ffmpeg_result.returncode != 0:
+                raise RuntimeError(
+                    f"ffmpeg decode failed: {ffmpeg_result.stderr or ffmpeg_result.stdout}"
+                )
+
+            waveform, sample_rate = sf.read(temp_decoded_wav, always_2d=False)
+            decode_source = "ffmpeg+soundfile"
+            print(
+                f"[whisper_bridge] Qwen audio decode fallback used ({decode_source}) after soundfile error: {sf_error}",
+                file=sys.stderr,
+            )
+
+        if getattr(waveform, "ndim", 1) > 1:
+            waveform = waveform.mean(axis=1)
+
+        waveform = waveform.astype(np.float32, copy=False)
+        audio_input = (waveform, int(sample_rate))
+
+        print(
+            f"[whisper_bridge] Qwen fast audio path: source={decode_source}, sr={sample_rate}, samples={waveform.shape[0]}, decode_ms={int((time.time()-decode_start)*1000)}",
+            file=sys.stderr,
+        )
+
+        infer_start = time.time()
+        results = model.transcribe(
+            audio=audio_input,
+            language=qwen_language,
+        )
+        infer_ms = int((time.time() - infer_start) * 1000)
+
+        if not results or len(results) == 0:
+            return {"success": False, "message": "No audio detected"}
+
+        item = results[0]
+        transcription = (item.text or "").strip()
+        detected_language = getattr(item, "language", "unknown")
+
+        if not transcription:
+            return {"success": False, "message": "No audio detected"}
+
+        print(
+            f"[whisper_bridge] Qwen result: detected_language={detected_language}, infer_ms={infer_ms}, text={transcription[:50]}...",
+            file=sys.stderr,
+        )
+
+        return {
+            "text": transcription,
+            "language": detected_language,
+            "success": True
+        }
+
+    except Exception as e:
+        print(f"[whisper_bridge] Qwen transcription error: {e}", file=sys.stderr)
+        return {"error": str(e), "success": False}
+    finally:
+        if temp_decoded_wav and os.path.exists(temp_decoded_wav):
+            try:
+                os.remove(temp_decoded_wav)
+            except Exception:
+                pass
+
+
 def transcribe_audio(audio_path, model_name="base", language=None, task="transcribe"):
-    """Transcribe audio file using Whisper/Distil-Whisper with optimizations
+    """Transcribe audio file using ASR model (Whisper, Distil-Whisper, or Qwen3-ASR)
 
     Args:
         audio_path: Path to audio file
-        model_name: Whisper model name
+        model_name: Model name (whisper, distil-whisper, or qwen-asr family)
         language: Language code (e.g., "en", "fr", "es") or None for auto-detect
         task: "transcribe" to keep original language, "translate" to convert to English
     """
@@ -693,12 +920,22 @@ def transcribe_audio(audio_path, model_name="base", language=None, task="transcr
         return {"error": f"Audio file not found: {audio_path}", "success": False}
 
     try:
+        # Get model family
+        model_info = WHISPER_MODELS.get(model_name)
+        family = model_info.get("family", "whisper") if model_info else "whisper"
+
         # Load model (uses cache for performance)
-        model = load_model(model_name)
-        if model is None:
+        model_data = load_model(model_name)
+        if model_data is None:
             return {"error": "Failed to load model", "success": False}
 
-        # Transcribe with faster-whisper
+        # Dispatch based on model family
+        if family == "qwen-asr":
+            return transcribe_qwen_audio(audio_path, model_data, language)
+
+        # Whisper/Distil-Whisper transcription (existing logic)
+        model = model_data["model"]  # WhisperModel object
+
         options = {
             "beam_size": 5,
             "vad_filter": True,  # Voice activity detection for better results
@@ -731,6 +968,192 @@ def transcribe_audio(audio_path, model_name="base", language=None, task="transcr
             "error": str(e),
             "success": False
         }
+
+
+def ensure_torchcodec(auto_install=True):
+    """Ensure torchcodec is available (best-effort auto install)."""
+    try:
+        import torchcodec  # noqa: F401
+        return {
+            "installed": True,
+            "auto_installed": False,
+            "warning": None,
+        }
+    except ImportError:
+        if not auto_install:
+            return {
+                "installed": False,
+                "auto_installed": False,
+                "warning": None,
+            }
+
+        try:
+            import subprocess
+            install = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-U", "torchcodec"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if install.returncode == 0:
+                try:
+                    import torchcodec  # noqa: F401
+                    return {
+                        "installed": True,
+                        "auto_installed": True,
+                        "warning": None,
+                    }
+                except ImportError:
+                    return {
+                        "installed": False,
+                        "auto_installed": False,
+                        "warning": "torchcodec install completed but module import still failed",
+                    }
+
+            return {
+                "installed": False,
+                "auto_installed": False,
+                "warning": install.stderr or install.stdout or "Failed to auto-install torchcodec",
+            }
+        except Exception as e:
+            return {
+                "installed": False,
+                "auto_installed": False,
+                "warning": str(e),
+            }
+
+
+def check_qwen_dependencies():
+    """Check if Qwen3-ASR dependencies are installed."""
+    try:
+        import transformers
+        import torch
+        import librosa
+        import soundfile
+        import qwen_asr
+
+        qwen_class_available = hasattr(qwen_asr, "Qwen3ASRModel")
+        tc = ensure_torchcodec(auto_install=True)
+
+        return {
+            "installed": True,
+            "working": qwen_class_available,
+            "transformers_version": transformers.__version__,
+            "qwen_asr_version": getattr(qwen_asr, "__version__", "unknown"),
+            "torch_version": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "torchcodec_installed": tc["installed"],
+            "torchcodec_auto_installed": tc["auto_installed"],
+            "torchcodec_warning": tc["warning"],
+            "success": True,
+        }
+    except ImportError as e:
+        return {
+            "installed": False,
+            "working": False,
+            "error": str(e),
+            "success": True,
+        }
+    except Exception as e:
+        return {
+            "installed": False,
+            "working": False,
+            "error": str(e),
+            "success": False,
+        }
+
+
+def install_qwen_dependencies():
+    """Install Qwen3-ASR dependencies via pip"""
+    try:
+        import subprocess
+
+        # Ensure pip is available in this interpreter/venv
+        pip_check = subprocess.run(
+            [sys.executable, "-m", "pip", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if pip_check.returncode != 0:
+            ensurepip_result = subprocess.run(
+                [sys.executable, "-m", "ensurepip", "--upgrade"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if ensurepip_result.returncode != 0:
+                return {
+                    "success": False,
+                    "error": ensurepip_result.stderr or "Failed to bootstrap pip",
+                }
+
+        # Upgrade pip first to improve resolver behavior
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "pip"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+
+        packages = [
+            "qwen-asr",
+            "transformers>=4.45.0",
+            "torch",
+            "torchaudio",
+            "librosa",
+            "soundfile",
+        ]
+
+        cmd = [sys.executable, "-m", "pip", "install", "-U"] + packages
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=1800,  # 30 minutes
+        )
+
+        if result.returncode != 0:
+            return {
+                "success": False,
+                "error": result.stderr or result.stdout or "Pip install failed",
+            }
+
+        # Optional accelerator for torchaudio decode path.
+        # Best-effort only: do not fail the whole install if unavailable for this platform/Python.
+        torchcodec_warning = None
+        torchcodec_install = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-U", "torchcodec"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if torchcodec_install.returncode != 0:
+            torchcodec_warning = (
+                torchcodec_install.stderr
+                or torchcodec_install.stdout
+                or "Failed to install torchcodec"
+            )
+
+        check_result = check_qwen_dependencies()
+        if not check_result.get("installed"):
+            return {
+                "success": False,
+                "error": "Dependencies installed but failed validation",
+            }
+
+        return {
+            "success": True,
+            "installed": True,
+            "message": "Qwen3-ASR dependencies installed successfully",
+            "cuda_available": check_result.get("cuda_available", False),
+            "torchcodec_installed": check_result.get("torchcodec_installed", False),
+            "torchcodec_warning": torchcodec_warning,
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "Installation timed out"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 def check_ffmpeg():
@@ -787,15 +1210,28 @@ def run_server(model_name="base"):
     """
     print(f"[whisper_bridge] Starting server mode with model '{model_name}'", file=sys.stderr)
 
+    # Get model family
+    model_info = WHISPER_MODELS.get(model_name)
+    family = model_info.get("family", "whisper") if model_info else "whisper"
+
+    # Check if Qwen model dependencies are available (lazy import)
+    if family == "qwen-asr":
+        try:
+            ensure_qwen_modules()
+        except ImportError:
+            error_result = {"error": "Qwen3-ASR requires qwen-asr + transformers + torch", "success": False}
+            print(json.dumps(error_result), flush=True)
+            sys.exit(1)
+
     # Preload model into GPU memory
-    model = load_model(model_name)
-    if model is None:
+    model_data = load_model(model_name)
+    if model_data is None:
         error_result = {"error": "Failed to load model", "success": False}
         print(json.dumps(error_result), flush=True)
         sys.exit(1)
 
     print(f"[whisper_bridge] Model '{model_name}' loaded and ready", file=sys.stderr)
-    print(json.dumps({"type": "ready", "model": model_name, "success": True}), flush=True)
+    print(json.dumps({"type": "ready", "model": model_name, "family": family, "success": True}), flush=True)
 
     # Server loop - read commands from stdin
     while True:
@@ -858,21 +1294,22 @@ def run_server(model_name="base"):
                 print(f"[whisper_bridge] Unloading model '{model_name}' to free GPU memory", file=sys.stderr)
                 # Explicitly unload previous model to free GPU memory
                 if model_name in _model_cache:
+                    old_model_data = _model_cache[model_name]
+                    # Clean up GPU memory for Qwen models
+                    if isinstance(old_model_data, dict) and old_model_data.get("family") == "qwen-asr":
+                        if torch and torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                     del _model_cache[model_name]
-                del model
+                del model_data
                 gc.collect()
                 # Force CUDA memory cleanup if available
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        print("[whisper_bridge] GPU memory cleared", file=sys.stderr)
-                except ImportError:
-                    pass
+                if torch and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    print("[whisper_bridge] GPU memory cleared", file=sys.stderr)
 
                 print(f"[whisper_bridge] Loading new model '{new_model}'", file=sys.stderr)
-                model = load_model(new_model)
-                if model is None:
+                model_data = load_model(new_model)
+                if model_data is None:
                     error_result = {"error": f"Failed to load model '{new_model}'", "success": False}
                     print(json.dumps(error_result), flush=True)
                 else:
@@ -896,7 +1333,7 @@ def run_server(model_name="base"):
 def main():
     parser = argparse.ArgumentParser(description="Whisper Bridge for OpenWhispr")
     parser.add_argument("--mode", default="transcribe",
-                       choices=["transcribe", "download", "check", "list", "delete", "check-ffmpeg", "server"],
+                       choices=["transcribe", "download", "check", "list", "delete", "check-ffmpeg", "server", "check-qwen", "install-qwen"],
                        help="Operation mode (default: transcribe)")
     parser.add_argument("audio_file", nargs="?", help="Path to audio file to transcribe")
     parser.add_argument("--model", default="base",
@@ -933,6 +1370,14 @@ def main():
         return
     elif args.mode == "check-ffmpeg":
         result = check_ffmpeg()
+        print(json.dumps(result))
+        return
+    elif args.mode == "check-qwen":
+        result = check_qwen_dependencies()
+        print(json.dumps(result))
+        return
+    elif args.mode == "install-qwen":
+        result = install_qwen_dependencies()
         print(json.dumps(result))
         return
     elif args.mode == "transcribe":

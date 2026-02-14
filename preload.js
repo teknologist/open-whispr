@@ -91,7 +91,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("transcribe-local-whisper", audioBlob, options),
   checkWhisperInstallation: () =>
     ipcRenderer.invoke("check-whisper-installation"),
+  checkQwenInstallation: () => ipcRenderer.invoke("check-qwen-installation"),
   installWhisper: () => ipcRenderer.invoke("install-whisper"),
+  installQwen: () => ipcRenderer.invoke("install-qwen"),
   onWhisperInstallProgress: registerListener("whisper-install-progress"),
   downloadWhisperModel: (modelName) =>
     ipcRenderer.invoke("download-whisper-model", modelName),

@@ -298,6 +298,19 @@ class IPCHandlers {
       return this.whisperManager.checkWhisperInstallation();
     });
 
+    ipcMain.handle("check-qwen-installation", async (event) => {
+      return this.whisperManager.checkQwenInstallation();
+    });
+
+    ipcMain.handle("install-qwen", async (event) => {
+      try {
+        const result = await this.whisperManager.installQwen();
+        return result;
+      } catch (error) {
+        throw error;
+      }
+    });
+
     ipcMain.handle("check-python-installation", async (event) => {
       return this.whisperManager.checkPythonInstallation();
     });
